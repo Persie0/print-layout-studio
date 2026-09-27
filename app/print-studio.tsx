@@ -18,7 +18,9 @@ import {
   Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -26,12 +28,14 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { readImageDimensions } from "@/lib/image-dimensions";
 import { createId } from "@/lib/ids";
 import { createImageGroup, MAX_IMAGE_GROUPS } from "@/lib/image-groups";
+import { findBestGroupMoves } from "@/lib/page-balancing";
 import { choosePageLayout } from "@/lib/page-orientation";
-import { estimateAveragePrintedTextHeightMm, estimatePrintedTextHeightMm, estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
+import { estimateAveragePrintedTextHeightMm, estimatePrintedTextHeightMm, estimateTextHeightRatio, fontSizePointsForTextHeightMm, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
 import { renderLatexToString } from "@/lib/latex-rendering";
 import { renderMarkdownToString, splitTextBlocks } from "@/lib/markdown-rendering";
 import { fitPageIntoFrame } from "@/lib/preview-fit";
 import { createPageArchive, readPageArchive } from "@/lib/page-archive";
+import { createWorkspaceArchive, readWorkspaceArchive } from "@/lib/workspace-archive";
 import { getPageSize, getPrintPageName, PAPER_FORMATS } from "@/lib/paper-formats";
 import { loadWorkspace, removeStoredImage, saveWorkspace } from "@/lib/storage";
 import type { StoredImage, StoredText, Workspace } from "@/lib/storage";
@@ -56,14 +60,10 @@ const MAX_PAGES = 30;
 const TEXT_WIDTH_PT = 240;
 const TEXT_PADDING_PT = 8;
 
-type PageMetrics = {
-  orientation: "portrait" | "landscape";
-  width: number;
-  height: number;
+type PageMetrics = ReturnType<typeof choosePageLayout> & {
   margin: number;
-  innerWidth: number;
-  innerHeight: number;
-  layout: ReturnType<typeof choosePageLayout>["layout"];
+  textFontSizes: Map<string, number>;
+  medianImageTextHeightMm: number | null;
 };
 
 type PageItem = (StoredImage & { type: "image"; scaleFactor?: number }) | (StoredText & { type: "text"; width: number; height: number });
@@ -110,46 +110,102 @@ function printedTextSizeLabel(image: StoredImage, placement: PageMetrics["layout
   return `Printed text ≈ ${heightMm < 0.05 ? "<0.1" : heightMm.toFixed(1)} mm`;
 }
 
+function medianPrintedTextHeightMm(images: StoredImage[], placements: PageMetrics["layout"]["placements"], imageBorderMm: number) {
+  const imagesById = new Map(images.map((image) => [image.id, image]));
+  const sizes = placements.flatMap((placement) => {
+    if (placement.type !== "image") return [];
+    const image = imagesById.get(placement.id);
+    const height = image ? estimatePrintedTextHeightMm(image, placement, imageBorderMm) : null;
+    return height === null ? [] : [height];
+  }).sort((left, right) => left - right);
+  if (!sizes.length) return null;
+  const middle = Math.floor(sizes.length / 2);
+  return sizes.length % 2 ? sizes[middle] : (sizes[middle - 1] + sizes[middle]) / 2;
+}
+
 function calculatePage(workspace: Workspace, pageNumber: number, imageScaleFactors: Map<string, number>): PageMetrics {
   const margin = Math.max(0, workspace.marginMm) * PT_PER_MM;
   const portraitSize = getPageSize(workspace.paper, "portrait");
   const landscapeSize = getPageSize(workspace.paper, "landscape");
-  const images: PageItem[] = workspace.images
+  const images = workspace.images
     .filter((image) => image.page === pageNumber)
-    .map((image) => ({ ...image, type: "image", scaleFactor: imageScaleFactors.get(image.id) ?? 1 }));
-  const texts: PageItem[] = workspace.texts
+    .map((image) => ({ ...image, type: "image" as const, scaleFactor: imageScaleFactors.get(image.id) ?? 1 }));
+  const texts: StoredText[] = workspace.texts
     .filter((text) => text.page === pageNumber)
     .map((text) => {
-      const textWidth = Math.min(TEXT_WIDTH_PT, Math.max(1, portraitSize.width - margin * 2));
-      return {
-        ...text,
-        type: "text",
-        width: textWidth,
-        height: text.format === "latex"
-          ? estimateMathBlockHeight(text.content, text.fontSize)
-          : estimateTextHeight(text.content, text.fontSize, textWidth),
-      };
+      return text;
     });
-  const items = [...images, ...texts];
-  const choice = choosePageLayout({
+  const commonOptions = {
     portraitSize,
     landscapeSize,
     orientation: workspace.orientation,
     margin,
     gap: Math.max(0, workspace.gapMm) * PT_PER_MM,
     imageBorder: Math.max(0, workspace.borderMm) * PT_PER_MM,
-    items: items.map((item) => ({
+  };
+  const layoutImages = images.map((item) => ({
       id: item.id,
       type: item.type,
       width: item.width,
       height: item.height,
-      ...(item.type === "image" ? {
-        scaleFactor: item.scaleFactor,
-        textHeightRatio: item.textHeightRatio,
-      } : {}),
-    })),
-  });
-  return { ...choice, margin };
+      scaleFactor: item.scaleFactor,
+      textHeightRatio: item.textHeightRatio,
+    }));
+  const imageOnlyChoice = choosePageLayout({ ...commonOptions, items: layoutImages });
+  const imageOnlyMedian = medianPrintedTextHeightMm(images, imageOnlyChoice.layout.placements, workspace.borderMm);
+  const firstAutoFontSize = imageOnlyMedian === null ? null : fontSizePointsForTextHeightMm(imageOnlyMedian);
+  const textFontSizes = new Map(texts.map((text) => [
+    text.id,
+    text.autoSize !== false && firstAutoFontSize !== null
+      ? firstAutoFontSize * (1 + Math.max(-75, Math.min(100, Number(text.autoSizeAdjustmentPercent) || 0)) / 100)
+      : text.fontSize,
+  ]));
+
+  let choice = imageOnlyChoice;
+  let medianImageTextHeightMm = imageOnlyMedian;
+  for (let pass = 0; pass < 5; pass += 1) {
+    const textItems: PageItem[] = texts.map((text) => {
+      const fontSize = textFontSizes.get(text.id) ?? text.fontSize;
+      const textWidth = Math.min(TEXT_WIDTH_PT, Math.max(1, portraitSize.width - margin * 2));
+      return {
+        ...text,
+        fontSize,
+        type: "text",
+        width: textWidth,
+        height: text.format === "latex"
+          ? estimateMathBlockHeight(text.content, fontSize)
+          : estimateTextHeight(text.content, fontSize, textWidth),
+      };
+    });
+    const items = [...images, ...textItems];
+    choice = choosePageLayout({
+      ...commonOptions,
+      items: items.map((item) => ({
+        id: item.id,
+        type: item.type,
+        width: item.width,
+        height: item.height,
+        ...(item.type === "image" ? {
+          scaleFactor: item.scaleFactor,
+          textHeightRatio: item.textHeightRatio,
+        } : {}),
+      })),
+    });
+    medianImageTextHeightMm = medianPrintedTextHeightMm(images, choice.layout.placements, workspace.borderMm);
+    const nextBaseFontSize = medianImageTextHeightMm === null
+      ? null
+      : fontSizePointsForTextHeightMm(medianImageTextHeightMm);
+    if (nextBaseFontSize === null) break;
+    let changed = false;
+    for (const text of texts) {
+      if (text.autoSize === false) continue;
+      const nextAutoFontSize = nextBaseFontSize * (1 + Math.max(-75, Math.min(100, Number(text.autoSizeAdjustmentPercent) || 0)) / 100);
+      if (Math.abs((textFontSizes.get(text.id) ?? text.fontSize) - nextAutoFontSize) > 0.05) changed = true;
+      textFontSizes.set(text.id, nextAutoFontSize);
+    }
+    if (!changed) break;
+  }
+  return { ...choice, margin, textFontSizes, medianImageTextHeightMm };
 }
 
 function clampPageCount(value: number) {
@@ -203,7 +259,6 @@ function PageSheet({
     ...(print ? {
       width: `${metrics.width}pt`,
       height: `${metrics.height}pt`,
-      page: metrics.orientation === "landscape" ? "sheetLandscape" : "sheetPortrait",
     } : previewSize ? {
       width: `${previewSize.width}px`,
       height: `${previewSize.height}px`,
@@ -213,7 +268,7 @@ function PageSheet({
 
   return (
     <div
-      className={`paper-sheet${print ? " print-sheet" : ""}`}
+      className={`paper-sheet${print ? ` print-sheet print-sheet-${metrics.orientation}` : ""}`}
       style={sheetStyle}
       data-page-number={pageNumber}
       data-orientation={metrics.orientation}
@@ -274,7 +329,8 @@ function PageSheet({
 
         const text = texts.get(placement.id);
         if (!text) return null;
-        const typeSize = `${(text.fontSize * 100) / metrics.width}cqw`;
+        const renderedFontSize = metrics.textFontSizes.get(text.id) ?? text.fontSize;
+        const typeSize = `${(renderedFontSize * 100) / metrics.width}cqw`;
         const padding = `${(TEXT_PADDING_PT * 100) / metrics.width}cqw`;
         const textStyle = { ...position, fontSize: typeSize, padding } as CSSProperties;
         const className = `sheet-text${text.format === "latex" ? " sheet-text-latex" : ""}${text.format === "markdown" ? " sheet-text-markdown" : ""}${selected ? " is-selected" : ""}`;
@@ -319,6 +375,9 @@ export default function PrintStudio() {
   const [workspace, setWorkspace] = useState<Workspace>(EMPTY_WORKSPACE);
   const [activePage, setActivePage] = useState(1);
   const [targetPage, setTargetPage] = useState(1);
+  const [balanceScope, setBalanceScope] = useState<"all" | "selected">("all");
+  const [selectedBalancePages, setSelectedBalancePages] = useState<number[]>([1]);
+  const [balanceResult, setBalanceResult] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
@@ -334,11 +393,13 @@ export default function PrintStudio() {
   const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
   const [previewPanning, setPreviewPanning] = useState(false);
+  const [showTopControls, setShowTopControls] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [saveState, setSaveState] = useState<"loading" | "saving" | "saved" | "error">("loading");
   const [ready, setReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const archiveInputRef = useRef<HTMLInputElement>(null);
+  const workspaceArchiveInputRef = useRef<HTMLInputElement>(null);
   const imageUrlsRef = useRef<Map<string, string>>(new Map());
   const pastedImageUndoRef = useRef<string[][]>([]);
   const previewStageRef = useRef<HTMLDivElement>(null);
@@ -409,36 +470,27 @@ export default function PrintStudio() {
   const imageScaleFactors = useMemo(() => workspace.autoMatchTextSize
     ? getTextMatchScaleFactors(workspace.images)
     : new Map(workspace.images.map((image) => [image.id, 1])), [workspace.autoMatchTextSize, workspace.images]);
-  const activeMetrics = useMemo(
-    () => calculatePage(workspace, activePage, imageScaleFactors),
-    [workspace, activePage, imageScaleFactors],
+  const pageOptions = useMemo(() => Array.from({ length: workspace.pageCount }, (_, index) => index + 1), [workspace.pageCount]);
+  const allPageMetrics = useMemo(
+    () => pageOptions.map((pageNumber) => calculatePage(workspace, pageNumber, imageScaleFactors)),
+    [workspace, imageScaleFactors, pageOptions],
   );
+  const activeMetrics = allPageMetrics[activePage - 1] ?? allPageMetrics[0];
   const matchedTextFontSize = useMemo(() => {
-    const pageMetrics = targetPage === activePage
-      ? activeMetrics
-      : calculatePage(workspace, targetPage, imageScaleFactors);
-    const imageById = new Map(workspace.images.map((image) => [image.id, image]));
-    const printedHeights = pageMetrics.layout.placements.flatMap((placement) => {
-      if (placement.type !== "image") return [];
-      const image = imageById.get(placement.id);
-      const height = image ? estimatePrintedTextHeightMm(image, placement, workspace.borderMm) : null;
-      return height !== null ? [height] : [];
-    }).sort((a, b) => a - b);
-    if (!printedHeights.length) return null;
-    const middle = Math.floor(printedHeights.length / 2);
-    const medianHeightMm = printedHeights.length % 2
-      ? printedHeights[middle]
-      : (printedHeights[middle - 1] + printedHeights[middle]) / 2;
-    // Printed OCR boxes are roughly 70% of the CSS font size for typical text.
-    return Math.max(8, Math.min(72, Math.round(medianHeightMm * PT_PER_MM / 0.7)));
-  }, [activeMetrics, activePage, imageScaleFactors, targetPage, workspace]);
+    const pageMetrics = allPageMetrics[targetPage - 1];
+    const fontSize = pageMetrics?.medianImageTextHeightMm === null || pageMetrics?.medianImageTextHeightMm === undefined
+      ? null
+      : fontSizePointsForTextHeightMm(pageMetrics.medianImageTextHeightMm);
+    return fontSize === null ? null : Math.max(1, Math.min(120, Math.round(fontSize)));
+  }, [allPageMetrics, targetPage]);
   const adjustedImageTextFontSize = matchedTextFontSize === null
     ? null
-    : Math.max(8, Math.min(72, Math.round(matchedTextFontSize * (1 + textSizeAdjustmentPercent / 100))));
+    : Math.max(1, Math.min(120, Math.round(matchedTextFontSize * (1 + textSizeAdjustmentPercent / 100))));
   const activeImages = workspace.images.filter((image) => image.page === activePage);
   const activeTexts = workspace.texts.filter((text) => text.page === activePage);
   const selectedText = workspace.texts.find((text) => text.id === selectedItemId) ?? null;
   const previewImage = workspace.images.find((image) => image.id === previewImageId) ?? null;
+  const previewImageMetrics = previewImage ? allPageMetrics[previewImage.page - 1] : null;
   const movePreviewImage = useCallback((direction: -1 | 1) => {
     if (workspace.images.length < 2) return;
     const currentIndex = workspace.images.findIndex((image) => image.id === previewImageId);
@@ -533,6 +585,43 @@ export default function PrintStudio() {
       setErrorMessage(error instanceof Error ? error.message : "Could not read this ZIP file.");
     }
   }, [addFiles]);
+
+  const downloadWorkspaceZip = useCallback(async () => {
+    try {
+      const archive = await createWorkspaceArchive(workspace);
+      const bytes = archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength) as ArrayBuffer;
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/zip" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "print-layout-workspace.zip";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not export this workspace.");
+    }
+  }, [workspace]);
+
+  const importWorkspaceZip = useCallback(async (file: File) => {
+    if ((workspace.images.length > 0 || workspace.texts.length > 0) &&
+      !window.confirm("Importing this workspace replaces the current pages, images, and text on this device. Continue?")) return;
+    try {
+      const restored = readWorkspaceArchive(new Uint8Array(await file.arrayBuffer()));
+      const urls = new Map(restored.images.map((image) => [image.id, URL.createObjectURL(image.blob)]));
+      for (const url of imageUrlsRef.current.values()) URL.revokeObjectURL(url);
+      imageUrlsRef.current = urls;
+      setImageUrls(urls);
+      setWorkspace(restored);
+      setActivePage(1);
+      setTargetPage(1);
+      setSelectedItemId(null);
+      setPreviewImageId(null);
+      setBalanceResult("");
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not import this workspace.");
+    }
+  }, [workspace.images.length, workspace.texts.length]);
 
   const downloadPageZip = useCallback(async () => {
     if (workspace.images.length === 0) {
@@ -746,25 +835,28 @@ export default function PrintStudio() {
     }
     const fontSize = matchImageTextSize && adjustedImageTextFontSize !== null
       ? adjustedImageTextFontSize
-      : Math.max(8, Math.min(72, Number(draftFontSize) || 16));
+      : Math.max(1, Math.min(120, Number(draftFontSize) || 16));
     setErrorMessage("");
     if (selectedText) {
       setWorkspace((current) => ({
         ...current,
         texts: current.texts.map((text) => text.id === selectedText.id
-          ? { ...text, content, fontSize, format: draftTextFormat }
+          ? { ...text, content, fontSize, autoSize: matchImageTextSize, autoSizeAdjustmentPercent: textSizeAdjustmentPercent, format: draftTextFormat }
           : text),
       }));
     } else {
       const contents = splitTextOnBlankLines ? splitTextBlocks(content) : [content];
       const texts: StoredText[] = contents.map((block) => ({
-        id: createId(), page: targetPage, content: block, fontSize, format: draftTextFormat,
+        id: createId(), page: targetPage, content: block, fontSize,
+        autoSize: matchImageTextSize,
+        autoSizeAdjustmentPercent: textSizeAdjustmentPercent,
+        format: draftTextFormat,
       }));
       setWorkspace((current) => ({ ...current, texts: [...current.texts, ...texts] }));
       setActivePage(targetPage);
       setSelectedItemId(texts[0]?.id ?? null);
     }
-  }, [adjustedImageTextFontSize, draftFontSize, draftText, draftTextFormat, matchImageTextSize, selectedText, splitTextOnBlankLines, targetPage]);
+  }, [adjustedImageTextFontSize, draftFontSize, draftText, draftTextFormat, matchImageTextSize, selectedText, splitTextOnBlankLines, targetPage, textSizeAdjustmentPercent]);
 
   const startNewText = useCallback(() => {
     setSelectedItemId(null);
@@ -779,13 +871,45 @@ export default function PrintStudio() {
     setTargetPage(image.page);
   }, []);
 
-  const pageOptions = Array.from({ length: workspace.pageCount }, (_, index) => index + 1);
-  const allPageMetrics = useMemo(
-    () => pageOptions.map((pageNumber) => calculatePage(workspace, pageNumber, imageScaleFactors)),
-    // page count determines the print pages; the workspace snapshot drives their content.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workspace, imageScaleFactors],
+  const selectedBalancePageOptions = useMemo(
+    () => selectedBalancePages.filter((page) => pageOptions.includes(page)),
+    [pageOptions, selectedBalancePages],
   );
+  const balanceCandidatePages = balanceScope === "all" ? pageOptions : selectedBalancePageOptions;
+  const getBalancePageStats = useCallback((candidateWorkspace: Workspace, pageNumber: number) => {
+    const metrics = calculatePage(candidateWorkspace, pageNumber, imageScaleFactors);
+    const pageImages = candidateWorkspace.images.filter((image) => image.page === pageNumber);
+    return {
+      fits: metrics.layout.fits,
+      average: estimateAveragePrintedTextHeightMm(pageImages, metrics.layout.placements, candidateWorkspace.borderMm),
+    };
+  }, [imageScaleFactors]);
+  const balancePlan = useMemo(() => findBestGroupMoves({
+    workspace,
+    pages: balanceCandidatePages,
+    getPageStats: getBalancePageStats,
+    createId,
+  }), [balanceCandidatePages, getBalancePageStats, workspace]);
+  const applyBalanceMove = useCallback(() => {
+    if (!balancePlan) return;
+    setWorkspace(balancePlan.workspace);
+    const movedImageCount = balancePlan.moves.reduce((total, move) => total + move.movedImageCount, 0);
+    const moveSummary = balancePlan.moves.map((move) =>
+      `${move.sourceGroupName} Page ${move.sourcePage} → ${move.destinationGroupName} Page ${move.targetPage}`,
+    ).join("; ");
+    const averageSummary = balanceCandidatePages.flatMap((page) => {
+      const average = getBalancePageStats(balancePlan.workspace, page).average;
+      return average === null ? [] : [`Page ${page} ≈ ${average.toFixed(1)} mm`];
+    }).join(" · ");
+    setBalanceResult(
+      `Moved ${balancePlan.moves.length} ${balancePlan.moves.length === 1 ? "group" : "groups"} (${movedImageCount} images): ${moveSummary}. ${averageSummary}`,
+    );
+  }, [balanceCandidatePages, balancePlan, getBalancePageStats]);
+  const balanceHint = balanceScope === "selected" && selectedBalancePageOptions.length < 2
+    ? "Select at least two pages to balance."
+    : balancePlan
+      ? `${balancePlan.moves.length} improving group move${balancePlan.moves.length === 1 ? "" : "s"} available in this scope.`
+      : "No group move can bring page averages closer within their current range.";
   const currentPaper = PAPER_FORMATS[workspace.paper];
   const previewSize = fitPageIntoFrame(
     activeMetrics.width,
@@ -841,26 +965,38 @@ export default function PrintStudio() {
     <div className="app-shell" onPaste={onPaste}>
       <style>{`@media print {
         @page sheetPortrait { size: ${getPrintPageName(workspace.paper)} portrait; margin: 0; }
-        @page sheetLandscape { size: ${getPrintPageName(workspace.paper)} landscape; margin: 0; }
       }`}</style>
-      <header className="topbar">
-        <div className="brand-lockup">
-          <span className="brand-mark"><Layers2 size={20} strokeWidth={2.5} /></span>
-          <div>
-            <p className="brand-name">Sheetline</p>
-            <p className="brand-caption">PRINT LAYOUT STUDIO</p>
+      {showTopControls ? (
+        <header className="topbar">
+          <div className="brand-lockup">
+            <span className="brand-mark"><Layers2 size={20} strokeWidth={2.5} /></span>
+            <div>
+              <p className="brand-name">Sheetline</p>
+              <p className="brand-caption">PRINT LAYOUT STUDIO</p>
+            </div>
           </div>
-        </div>
-        <div className="topbar-actions">
-          <SaveIndicator state={saveState} />
+          <div className="topbar-actions">
+            <SaveIndicator state={saveState} />
+            <Button variant="outline" size="sm" onClick={() => setShowTopControls(false)} aria-label="Hide top bars">
+              Hide top bars
+            </Button>
+            <Button className="print-button" onClick={() => window.print()}>
+              <Printer size={17} aria-hidden="true" />
+              Print pages
+            </Button>
+          </div>
+        </header>
+      ) : (
+        <div className="compact-top-actions">
+          <Button variant="outline" size="sm" onClick={() => setShowTopControls(true)} aria-label="Show again">Show again</Button>
           <Button className="print-button" onClick={() => window.print()}>
             <Printer size={17} aria-hidden="true" />
             Print pages
           </Button>
         </div>
-      </header>
+      )}
 
-      <section className="paper-toolbar" aria-label="Page setup">
+      {showTopControls ? <section className="paper-toolbar" aria-label="Page setup">
         <div className="toolbar-field paper-field">
           <label>Paper format</label>
           <Select
@@ -981,7 +1117,7 @@ export default function PrintStudio() {
           </div>
         </div>
         <p className="toolbar-hint">A small safe edge for most home printers</p>
-      </section>
+      </section> : null}
 
       <main className="studio-layout">
         <aside className="inspector" aria-label="Page contents">
@@ -1020,6 +1156,12 @@ export default function PrintStudio() {
                 <Button variant="outline" size="sm" onClick={() => archiveInputRef.current?.click()}>
                   Import page ZIP
                 </Button>
+                <Button variant="outline" size="sm" onClick={() => void downloadWorkspaceZip()}>
+                  Export workspace
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => workspaceArchiveInputRef.current?.click()}>
+                  Import workspace
+                </Button>
                 <Input
                   ref={archiveInputRef}
                   className="file-input"
@@ -1031,6 +1173,18 @@ export default function PrintStudio() {
                     event.currentTarget.value = "";
                   }}
                   aria-label="Import page ZIP"
+                />
+                <Input
+                  ref={workspaceArchiveInputRef}
+                  className="file-input"
+                  type="file"
+                  accept=".zip,application/zip"
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    if (file) void importWorkspaceZip(file);
+                    event.currentTarget.value = "";
+                  }}
+                  aria-label="Import workspace ZIP"
                 />
               </div>
               <label className="auto-match-toggle">
@@ -1103,6 +1257,51 @@ export default function PrintStudio() {
               ) : (
                 <p className="image-groups-note">Create a group to mark its images with one border color.</p>
               )}
+              <div className="balance-pages-control">
+                <span className="balance-pages-title">Balance printed text sizes</span>
+                <div className="balance-pages-actions">
+                  <Select
+                    value={balanceScope}
+                    onValueChange={(value) => {
+                      if (value === "all" || value === "selected") setBalanceScope(value);
+                    }}
+                  >
+                    <SelectTrigger className="balance-scope-select" aria-label="Page scope for balancing"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All pages</SelectItem>
+                      <SelectItem value="selected">Selected pages</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {balanceScope === "selected" ? (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" size="sm" className="balance-page-picker" aria-label="Choose pages to balance">
+                          {selectedBalancePageOptions.length} selected
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="balance-pages-popover">
+                        {pageOptions.map((page) => (
+                          <label className="balance-page-choice" key={`balance-page-${page}`}>
+                            <Checkbox
+                              checked={selectedBalancePageOptions.includes(page)}
+                              aria-label={`Include Page ${page} in balancing`}
+                              onCheckedChange={(checked) => setSelectedBalancePages((current) => checked === true
+                                ? [...new Set([...current, page])].sort((left, right) => left - right)
+                                : current.filter((candidate) => candidate !== page))}
+                            />
+                            <span>Page {page}</span>
+                          </label>
+                        ))}
+                      </PopoverContent>
+                    </Popover>
+                  ) : null}
+                  <Button variant="outline" size="sm" onClick={applyBalanceMove} disabled={!balancePlan} aria-label="Balance pages">
+                    Balance pages
+                  </Button>
+                </div>
+                <p className="balance-pages-hint">{balanceHint}</p>
+                {balanceResult ? <p className="balance-pages-result" role="status" aria-label="Page balance result">{balanceResult}</p> : null}
+              </div>
             </div>
             <div className="target-page-control">
               <label htmlFor="image-target">Place new items on</label>
@@ -1156,11 +1355,11 @@ export default function PrintStudio() {
                   id="text-size"
                   className="text-size-input"
                   type="number"
-                  min={8}
-                  max={72}
+                  min={1}
+                  max={120}
                   value={matchImageTextSize && adjustedImageTextFontSize !== null ? adjustedImageTextFontSize : draftFontSize}
                   readOnly={matchImageTextSize && adjustedImageTextFontSize !== null}
-                  onChange={(event) => setDraftFontSize(Math.max(8, Math.min(72, Number(event.target.value) || 8)))}
+                  onChange={(event) => setDraftFontSize(Math.max(1, Math.min(120, Number(event.target.value) || 1)))}
                 />
                 <span>pt</span>
               </div>
@@ -1190,9 +1389,9 @@ export default function PrintStudio() {
                 type="checkbox"
                 checked={matchImageTextSize}
                 onChange={(event) => setMatchImageTextSize(event.target.checked)}
-                aria-label="Match typed text to image text size"
+                aria-label="Auto-size typed text to detected image text"
               />
-              <span>{adjustedImageTextFontSize === null ? "Match image text size (scan images first)" : `Match image text size (${adjustedImageTextFontSize} pt)`}</span>
+              <span>{adjustedImageTextFontSize === null ? "Auto-size text to image text (scan images first)" : `Auto-size text to image text (${adjustedImageTextFontSize} pt)`}</span>
             </label>
             <label className="split-text-toggle">
               <input
@@ -1282,7 +1481,8 @@ export default function PrintStudio() {
                       setTargetPage(text.page);
                       setDraftText(text.content);
                       setDraftFontSize(text.fontSize);
-                      setMatchImageTextSize(false);
+                      setMatchImageTextSize(text.autoSize !== false);
+                      setTextSizeAdjustmentPercent(text.autoSizeAdjustmentPercent ?? 0);
                       setDraftTextFormat(text.format === "latex" || text.format === "markdown" ? text.format : "plain");
                     }} aria-label={`Edit text block: ${text.content.slice(0, 40)}`}>
                       <span className="item-text-icon"><FileText size={17} /></span>
@@ -1371,16 +1571,24 @@ export default function PrintStudio() {
       </main>
 
       <div className="print-document" aria-hidden="true">
-        {pageOptions.map((page, index) => (
-          <PageSheet
-            key={`print-${page}`}
-            workspace={workspace}
-            imageUrls={imageUrls}
-            pageNumber={page}
-            metrics={allPageMetrics[index]}
-            print
-          />
-        ))}
+        {pageOptions.map((page, index) => {
+          const portraitPaper = getPageSize(workspace.paper, "portrait");
+          const printPageStyle = {
+            width: `${portraitPaper.width}pt`,
+            height: `${portraitPaper.height}pt`,
+          } as CSSProperties;
+          return (
+            <div key={`print-page-${page}`} className="print-page" style={printPageStyle}>
+              <PageSheet
+                workspace={workspace}
+                imageUrls={imageUrls}
+                pageNumber={page}
+                metrics={allPageMetrics[index]}
+                print
+              />
+            </div>
+          );
+        })}
       </div>
 
       <Dialog open={previewImage !== null} onOpenChange={(open) => {
@@ -1390,7 +1598,9 @@ export default function PrintStudio() {
           <DialogContent className="image-preview-dialog">
             <DialogHeader>
               <DialogTitle>{previewImage.name}</DialogTitle>
-              <DialogDescription>{previewImage.width} × {previewImage.height} px · original image</DialogDescription>
+              <DialogDescription>
+                {previewImage.width} × {previewImage.height} px · original image · Page {previewImage.page} · {currentPaper.label} · {previewImageMetrics?.orientation ?? "Portrait"}
+              </DialogDescription>
             </DialogHeader>
             <div className="image-preview-navigation">
               <Button variant="outline" size="sm" aria-label="Previous image" onClick={() => movePreviewImage(-1)} disabled={workspace.images.length < 2}>

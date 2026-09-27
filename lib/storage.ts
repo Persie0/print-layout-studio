@@ -21,6 +21,8 @@ export type StoredText = {
   content: string;
   fontSize: number;
   format?: "plain" | "latex" | "markdown";
+  autoSize?: boolean;
+  autoSizeAdjustmentPercent?: number;
 };
 
 export type Workspace = {
@@ -124,6 +126,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
     texts: Array.isArray(record.texts) ? (record.texts as StoredText[]).map((text) => ({
       ...text,
       format: text.format === "latex" || text.format === "markdown" ? text.format : "plain",
+      autoSize: text.autoSize !== false,
     })) : [],
   };
 }

@@ -97,6 +97,13 @@ async function readPrintedTextMm(locator) {
   return match ? Number(match[1]) : null;
 }
 
+async function readPageAverageMm(page, pageNumber) {
+  await page.getByRole("tab", { name: `Page ${pageNumber}` }).click();
+  const text = await page.locator(".preview-average").textContent();
+  const match = text?.match(/≈\s*([\d.]+) mm/);
+  return match ? Number(match[1]) : null;
+}
+
 test("real workflow: add page items, adjust print settings, and restore them after reload", async ({ page }) => {
   await openStudio(page);
   const png = await makePng(page);
@@ -162,14 +169,14 @@ test("real workflow: show the disabled text action with readable contrast", asyn
   expect(colors).toEqual({ foreground: "rgb(97, 114, 118)", background: "rgb(228, 234, 231)" });
 });
 
-test("real workflow: auto-size typed text to the median detected image text", async ({ page }) => {
+test("real workflow: auto-size typed text with image OCR and keep it linked after reload", async ({ page }) => {
   await openStudio(page);
   const png = await makePng(page, 900, 900);
   await page.getByLabel("Choose images").setInputFiles({ name: "text-size-reference.png", mimeType: "image/png", buffer: png });
   await saveOcrRatios(page, { "text-size-reference.png": 0.05 });
   await page.reload();
 
-  const autoSize = page.getByRole("checkbox", { name: "Match typed text to image text size" });
+  const autoSize = page.getByRole("checkbox", { name: "Auto-size typed text to detected image text" });
   await expect(autoSize).toBeChecked();
   const typeSize = page.getByLabel("Type size");
   await expect(typeSize).toHaveAttribute("readonly", "");
@@ -187,6 +194,21 @@ test("real workflow: auto-size typed text to the median detected image text", as
   await page.getByLabel("Text block content").fill("Text sized to match the image");
   await page.getByRole("button", { name: "Add text block" }).click();
   await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.fontSize).toBe(Math.max(8, smallerSize));
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.autoSize).toBe(true);
+  const renderedAutoText = page.locator(".paper-sheet:not(.print-sheet) .sheet-text");
+  const originalRenderedSize = await renderedAutoText.evaluate((text) => Number.parseFloat(getComputedStyle(text).fontSize));
+  const selectedTextColors = await renderedAutoText.evaluate((text) => ({
+    background: getComputedStyle(text).backgroundColor,
+    borderColor: getComputedStyle(text).borderTopColor,
+  }));
+  expect(selectedTextColors.background).toBe("rgba(0, 0, 0, 0)");
+  expect(selectedTextColors.borderColor).not.toBe("rgba(0, 0, 0, 0)");
+
+  await saveOcrRatios(page, { "text-size-reference.png": 0.1 });
+  await page.reload();
+  const resizedAutoText = page.locator(".paper-sheet:not(.print-sheet) .sheet-text");
+  await expect.poll(async () => Number.parseFloat(await resizedAutoText.evaluate((text) => getComputedStyle(text).fontSize)))
+    .toBeGreaterThan(originalRenderedSize * 1.5);
 
   await autoSize.uncheck();
   await expect(typeSize).not.toHaveAttribute("readonly", "");
@@ -204,7 +226,31 @@ test("real workflow: remove an image from the full-resolution viewer", async ({ 
   await expect(page.getByRole("button", { name: "Select remove-from-viewer.png" })).toHaveCount(0);
 });
 
-test("real workflow: auto-rotate each sheet for its photos and print both paper orientations", async ({ page }) => {
+test("real workflow: show the image's sheet and paper details in its full-resolution viewer", async ({ page }) => {
+  await openStudio(page);
+  await page.getByRole("button", { name: "Add one page" }).click();
+  const png = await makePng(page, 100, 60);
+  await page.getByLabel("Choose images").setInputFiles({ name: "page-information.png", mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "Preview full image page-information.png" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(/Page 2 · A4 · (Portrait|Landscape)/)).toBeVisible();
+});
+
+test("real workflow: hide the page setup bars and bring them back from the sheet view", async ({ page }) => {
+  await openStudio(page);
+  await page.getByRole("button", { name: "Hide top bars" }).click();
+  await expect(page.locator(".topbar")).toHaveCount(0);
+  await expect(page.locator(".paper-toolbar")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Show again" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Print pages" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Show again" }).click();
+  await expect(page.locator(".topbar")).toBeVisible();
+  await expect(page.locator(".paper-toolbar")).toBeVisible();
+});
+
+test("real workflow: auto orientation is per-sheet but printed pages all use portrait paper", async ({ page }) => {
   await openStudio(page);
   await page.getByLabel("Number of pages").fill("2");
 
@@ -233,11 +279,17 @@ test("real workflow: auto-rotate each sheet for its photos and print both paper 
   await expect.poll(() => printPageOne.locator("img").evaluate((image) => [image.naturalWidth, image.naturalHeight])).toEqual([1600, 900]);
   await expect.poll(() => printPageTwo.locator("img").evaluate((image) => [image.naturalWidth, image.naturalHeight])).toEqual([900, 1600]);
 
+  await page.emulateMedia({ media: "print" });
+  const rotatedSheetTransform = await printPageOne.evaluate((sheet) => getComputedStyle(sheet).transform);
+  expect(rotatedSheetTransform).not.toBe("none");
   const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+  await page.emulateMedia({ media: "screen" });
   const boxes = [...pdf.toString("latin1").matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
     .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
   expect(boxes).toHaveLength(2);
-  expect(boxes[0].width).toBeGreaterThan(boxes[0].height);
+  expect(boxes[0].width).toBeCloseTo(boxes[1].width, 1);
+  expect(boxes[0].height).toBeCloseTo(boxes[1].height, 1);
+  expect(boxes[0].height).toBeGreaterThan(boxes[0].width);
   expect(boxes[1].height).toBeGreaterThan(boxes[1].width);
 });
 
@@ -263,6 +315,58 @@ test("real workflow: lets users force portrait or landscape and remembers the se
   await page.getByRole("combobox", { name: "Orientation" }).click();
   await page.getByRole("option", { name: "Auto" }).click();
   await expect(page.getByRole("combobox", { name: "Orientation" })).toContainText("Auto");
+});
+
+test("real workflow: export a complete workspace and import it in a fresh browser profile", async ({ page, browser }) => {
+  await openStudio(page);
+  const png = await makePng(page, 640, 480);
+  await page.getByLabel("Choose images").setInputFiles({ name: "portable-scan.png", mimeType: "image/png", buffer: png });
+  await saveOcrRatios(page, { "portable-scan.png": 0.05 });
+  await page.reload();
+  await page.getByRole("button", { name: "New image group" }).click();
+  await page.getByLabel("Group for portable-scan.png").click();
+  await page.getByRole("option", { name: "Group 1" }).click();
+  await page.getByLabel("Automatically match image text sizes").uncheck();
+  await page.getByLabel("Auto OCR pasted images").check();
+  await page.getByLabel("Number of pages").fill("2");
+  await page.getByLabel("Gap between images in millimeters").fill("4");
+  await page.getByLabel("Image border width in millimeters").fill("2");
+  await page.getByRole("combobox", { name: "Paper format" }).click();
+  await page.getByRole("option", { name: "A5" }).click();
+  await page.getByRole("combobox", { name: "Orientation" }).click();
+  await page.getByRole("option", { name: "Landscape" }).click();
+  await page.getByLabel("Text block content").fill("Portable caption");
+  await page.getByRole("button", { name: "Add text block" }).click();
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.autoSize).toBe(true);
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("button", { name: "Export workspace" }).click(),
+  ]);
+  const exportPath = await download.path();
+  expect(download.suggestedFilename()).toBe("print-layout-workspace.zip");
+
+  const restoreContext = await browser.newContext();
+  try {
+    const restorePage = await restoreContext.newPage();
+    await openStudio(restorePage);
+    await restorePage.getByLabel("Import workspace ZIP").setInputFiles(exportPath);
+    await expect(restorePage.getByLabel("Gap between images in millimeters")).toHaveValue("4");
+    await expect(restorePage.getByLabel("Image border width in millimeters")).toHaveValue("2");
+    await expect(restorePage.getByRole("combobox", { name: "Paper format" })).toContainText("A5");
+    await expect(restorePage.getByRole("combobox", { name: "Orientation" })).toContainText("Landscape");
+    await expect(restorePage.getByRole("tab", { name: "Page 2" })).toBeVisible();
+    await expect(restorePage.getByRole("button", { name: "Select portable-scan.png" })).toBeVisible();
+    await expect(restorePage.getByRole("button", { name: /Edit text block: Portable caption/ })).toBeVisible();
+    await expect(restorePage.getByRole("checkbox", { name: "Automatically match image text sizes" })).not.toBeChecked();
+    await expect(restorePage.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();
+    const restored = await readStoredWorkspace(restorePage);
+    expect(restored.images[0]).toMatchObject({ ocrScanned: true, textHeightRatio: 0.05, groupId: restored.groups[0].id });
+    expect(restored.texts[0]).toMatchObject({ content: "Portable caption", autoSize: true });
+    await expect(restorePage.getByText("Saved on this device")).toBeVisible();
+  } finally {
+    await restoreContext.close();
+  }
 });
 
 test("real workflow: group images by border color, persist groups, and enforce the color limit", async ({ page }) => {
@@ -329,6 +433,129 @@ test("real workflow: print sequential small numbers on every image in a group", 
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" })).toBeChecked();
   await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText(["1", "2", "3", "4"]);
+});
+
+test("real workflow: balance selected pages by moving a group into a new numbered group", async ({ page }) => {
+  await openStudio(page);
+  await page.getByRole("checkbox", { name: "Automatically match image text sizes" }).uncheck();
+  const square = await makePng(page, 640, 640);
+  const pageOneNames = ["balance-p1-a.png", "balance-p1-b.png", "balance-p1-c.png"];
+  await page.getByLabel("Choose images").setInputFiles(pageOneNames.map((name) => ({ name, mimeType: "image/png", buffer: square })));
+  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "New image group" }).click();
+  for (const [index, name] of pageOneNames.entries()) {
+    await page.getByLabel(`Group for ${name}`).click();
+    await page.getByRole("option", { name: `Group ${index + 1}` }).click();
+  }
+
+  await page.getByRole("checkbox", { name: "Print small numbers on Group 2 images" }).check();
+  await page.getByRole("button", { name: "Add one page" }).click();
+  const pageTwoNames = ["balance-p2-a.png", "balance-p2-b.png", "balance-p2-c.png"];
+  await page.getByLabel("Choose images").setInputFiles(pageTwoNames.map((name) => ({ name, mimeType: "image/png", buffer: square })));
+  for (const [index, name] of pageTwoNames.entries()) {
+    await page.getByLabel(`Group for ${name}`).click();
+    await page.getByRole("option", { name: index === 0 ? "Group 1" : "Group 2" }).click();
+  }
+
+  await saveOcrRatios(page, {
+    "balance-p1-a.png": 0.01,
+    "balance-p1-b.png": 0.01,
+    "balance-p1-c.png": 0.01,
+    "balance-p2-a.png": 0.03,
+    "balance-p2-b.png": 0.09,
+    "balance-p2-c.png": 0.09,
+  });
+  await page.reload();
+  await expect(page.getByRole("combobox", { name: "Page scope for balancing" })).toContainText("All pages");
+  await page.getByRole("combobox", { name: "Page scope for balancing" }).click();
+  await page.getByRole("option", { name: "Selected pages" }).click();
+  await page.getByRole("button", { name: "Choose pages to balance" }).click();
+  const balanceButton = page.getByRole("button", { name: "Balance pages" });
+  await expect(balanceButton).toBeDisabled();
+  await page.getByRole("checkbox", { name: "Include Page 2 in balancing" }).check();
+  await expect(balanceButton).toBeEnabled();
+
+  const pageOneBefore = await readPageAverageMm(page, 1);
+  const pageTwoBefore = await readPageAverageMm(page, 2);
+  expect(pageOneBefore).not.toBeNull();
+  expect(pageTwoBefore).not.toBeNull();
+  const workspaceBefore = await readStoredWorkspace(page);
+  const originalGroupTwo = workspaceBefore.groups.find((group) => group.name === "Group 2");
+  const imagesToMove = workspaceBefore.images.filter((image) => image.page === 2 && image.groupId === originalGroupTwo.id);
+  expect(imagesToMove).toHaveLength(2);
+
+  await balanceButton.click();
+  await expect(page.getByRole("status", { name: "Page balance result" })).toContainText("Group 4");
+  await expect.poll(async () => {
+    const workspace = await readStoredWorkspace(page);
+    return workspace?.images.filter((image) => imagesToMove.some((moved) => moved.id === image.id && image.page === 1)).length;
+  }).toBe(2);
+
+  const workspaceAfter = await readStoredWorkspace(page);
+  const movedGroup = workspaceAfter.groups.find((group) => group.name === "Group 4");
+  expect(movedGroup).toBeTruthy();
+  expect(movedGroup.numberImages).toBe(true);
+  const movedImagesAfter = workspaceAfter.images.filter((image) => imagesToMove.some((moved) => moved.id === image.id));
+  expect(movedImagesAfter).toHaveLength(2);
+  expect(movedImagesAfter.every((image) => image.page === 1 && image.groupId === movedGroup.id)).toBe(true);
+  expect(workspaceAfter.images.find((image) => image.id === "balance-p1-b.png").groupId).toBe(originalGroupTwo.id);
+  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-b.png"] .sheet-image-number')).toHaveText("1");
+  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-c.png"] .sheet-image-number')).toHaveText("2");
+
+  const pageOneAfter = await readPageAverageMm(page, 1);
+  const pageTwoAfter = await readPageAverageMm(page, 2);
+  const oldDifference = Math.abs(pageOneBefore - pageTwoBefore);
+  const newDifference = Math.abs(pageOneAfter - pageTwoAfter);
+  expect(newDifference).toBeLessThan(oldDifference);
+  for (const average of [pageOneAfter, pageTwoAfter]) {
+    expect(average).toBeGreaterThanOrEqual(Math.min(pageOneBefore, pageTwoBefore) - 0.1);
+    expect(average).toBeLessThanOrEqual(Math.max(pageOneBefore, pageTwoBefore) + 0.1);
+  }
+});
+
+test("real workflow: retain a group's number when balancing moves it intact to another page", async ({ page }) => {
+  await openStudio(page);
+  await page.getByRole("checkbox", { name: "Automatically match image text sizes" }).uncheck();
+  const square = await makePng(page, 900, 900);
+  await page.getByLabel("Choose images").setInputFiles({ name: "reuse-page-one.png", mimeType: "image/png", buffer: square });
+  await page.getByRole("button", { name: "New image group" }).click();
+  await page.getByLabel("Group for reuse-page-one.png").click();
+  await page.getByRole("option", { name: "Group 1" }).click();
+  await page.getByRole("button", { name: "Add one page" }).click();
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "reuse-moving-a.png", mimeType: "image/png", buffer: square },
+    { name: "reuse-moving-b.png", mimeType: "image/png", buffer: square },
+    { name: "reuse-staying-a.png", mimeType: "image/png", buffer: square },
+    { name: "reuse-staying-b.png", mimeType: "image/png", buffer: square },
+  ]);
+  await page.getByRole("button", { name: "New image group" }).click();
+  for (const name of ["reuse-moving-a.png", "reuse-moving-b.png"]) {
+    await page.getByLabel(`Group for ${name}`).click();
+    await page.getByRole("option", { name: "Group 2" }).click();
+  }
+  await page.getByRole("button", { name: "New image group" }).click();
+  for (const name of ["reuse-staying-a.png", "reuse-staying-b.png"]) {
+    await page.getByLabel(`Group for ${name}`).click();
+    await page.getByRole("option", { name: "Group 3" }).click();
+  }
+  await page.getByRole("checkbox", { name: "Print small numbers on Group 2 images" }).check();
+  await saveOcrRatios(page, {
+    "reuse-page-one.png": 0.01,
+    "reuse-moving-a.png": 0.08,
+    "reuse-moving-b.png": 0.08,
+    "reuse-staying-a.png": 0.08,
+    "reuse-staying-b.png": 0.08,
+  });
+  await page.reload();
+
+  await expect(page.getByRole("button", { name: "Balance pages" })).toBeEnabled();
+  await page.getByRole("button", { name: "Balance pages" }).click();
+  await expect(page.getByRole("status", { name: "Page balance result" })).toContainText("Group 2 Page 2 → Group 2 Page 1");
+  const workspace = await readStoredWorkspace(page);
+  expect(workspace.groups.map((group) => group.name)).toEqual(["Group 1", "Group 2", "Group 3"]);
+  expect(workspace.images.find((image) => image.name === "reuse-moving-a.png")).toMatchObject({ page: 1, groupId: workspace.groups[1].id });
+  expect(workspace.images.find((image) => image.name === "reuse-moving-b.png")).toMatchObject({ page: 1, groupId: workspace.groups[1].id });
+  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image reuse-moving-a.png"] .sheet-image-number')).toHaveText("1");
+  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image reuse-moving-b.png"] .sheet-image-number')).toHaveText("2");
 });
 
 test("real workflow: show current printed OCR text size and update it when an image moves pages", async ({ page }) => {
