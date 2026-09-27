@@ -1,10 +1,18 @@
 import { expect, test } from "@playwright/test";
 import { unzipSync, zipSync } from "fflate";
 
-const png = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-  "base64",
-);
+async function makePng(page) {
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#2684ff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
 
 async function openStudio(page) {
   await page.goto("/");
@@ -14,6 +22,7 @@ async function openStudio(page) {
 
 test("real workflow: add page items, adjust print settings, and restore them after reload", async ({ page }) => {
   await openStudio(page);
+  const png = await makePng(page);
   await page.getByLabel("Choose images").setInputFiles({ name: "red-square.png", mimeType: "image/png", buffer: png });
   await expect(page.getByRole("button", { name: "Select red-square.png" })).toBeVisible();
 
@@ -43,6 +52,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
 
 test("real workflow: delete an image and keep it deleted after reload", async ({ page }) => {
   await openStudio(page);
+  const png = await makePng(page);
   await page.getByLabel("Choose images").setInputFiles({ name: "remove-me.png", mimeType: "image/png", buffer: png });
   await expect(page.getByRole("button", { name: "Select remove-me.png" })).toBeVisible();
   await page.getByRole("button", { name: "Remove remove-me.png" }).click();
@@ -57,6 +67,7 @@ test("real workflow: delete an image and keep it deleted after reload", async ({
 
 test("real workflow: move an image to another page and restore the assignment after reload", async ({ page }) => {
   await openStudio(page);
+  const png = await makePng(page);
   await page.getByLabel("Choose images").setInputFiles({ name: "move-me.png", mimeType: "image/png", buffer: png });
   await page.getByLabel("Number of pages").fill("2");
   await page.getByLabel("Page for move-me.png").click();
@@ -75,6 +86,7 @@ test("real workflow: move an image to another page and restore the assignment af
 
 test("real workflow: import Page folders, then download a ZIP with those folders", async ({ page }) => {
   await openStudio(page);
+  const png = await makePng(page);
   const archive = zipSync({
     "Page 1/first.png": png,
     "Page 2/second.png": png,
@@ -111,6 +123,7 @@ test("real workflow: import Page folders, then download a ZIP with those folders
 test("real workflow: OCR text and resize images to match their printed letter height", async ({ page }) => {
   test.setTimeout(120_000);
   await openStudio(page);
+  const png = await makePng(page);
   const makeTextImage = async (text, fontSize) => {
     const dataUrl = await page.evaluate(({ content, size }) => {
       const canvas = document.createElement("canvas");
