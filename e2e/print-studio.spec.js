@@ -173,9 +173,10 @@ test("real workflow: lets users force portrait or landscape and remembers the se
   await page.getByRole("option", { name: "Landscape" }).click();
   await expect(previewSheet).toHaveAttribute("data-orientation", "landscape");
   await expect(page.locator(".preview-spec")).toContainText("Landscape");
+  await expect.poll(async () => (await readStoredWorkspace(page))?.orientation).toBe("landscape");
 
   await page.reload();
-  await expect(page.getByRole("combobox", { name: "Orientation" })).toContainText("Landscape");
+  await expect(page.getByRole("combobox", { name: "Orientation" })).toHaveText("Landscape");
   await expect(previewSheet).toHaveAttribute("data-orientation", "landscape");
 
   await page.getByRole("combobox", { name: "Orientation" }).click();
