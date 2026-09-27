@@ -37,7 +37,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await page.getByLabel("Text block content").fill("Keep this complete caption together on page two.");
   await page.getByLabel("Type size").fill("18");
   await page.getByRole("button", { name: "Add text block" }).click();
-  await expect(page.getByRole("button", { name: "Page 2" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
   await expect(page.getByText(/A5 · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
   await expect(page.getByText("Keep this complete caption together on page two.")).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
@@ -47,7 +47,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await expect(page.getByLabel("Gap between images in millimeters")).toHaveValue("6");
   await expect(page.getByLabel("Image border width in millimeters")).toHaveValue("2");
   await expect(page.getByText(/A5 · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Page 2" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
 });
 
 test("real workflow: delete an image and keep it deleted after reload", async ({ page }) => {
@@ -72,14 +72,14 @@ test("real workflow: move an image to another page and restore the assignment af
   await page.getByLabel("Number of pages").fill("2");
   await page.getByLabel("Page for move-me.png").click();
   await page.getByRole("option", { name: "Page 2" }).click();
-  await page.getByRole("button", { name: "Page 2" }).click();
+  await page.getByRole("tab", { name: "Page 2" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
   await expect(page.getByText("Page 2 items")).toBeVisible();
-  await page.getByRole("button", { name: "Page 1" }).click();
+  await page.getByRole("tab", { name: "Page 1" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toHaveCount(0);
 
   await page.reload();
-  await page.getByRole("button", { name: "Page 2" }).click();
+  await page.getByRole("tab", { name: "Page 2" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
   await expect(page.getByLabel("Page for move-me.png")).toContainText("Page 2");
 });
@@ -98,8 +98,8 @@ test("real workflow: import Page folders, then download a ZIP with those folders
     buffer: Buffer.from(archive),
   });
   await expect(page.getByRole("button", { name: "Select first.png" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Page 3" })).toBeVisible();
-  await page.getByRole("button", { name: "Page 1" }).click();
+  await expect(page.getByRole("tab", { name: "Page 3" })).toBeVisible();
+  await page.getByRole("tab", { name: "Page 1" }).click();
   await expect(page.getByRole("button", { name: "Select first.png" })).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent("download"),
