@@ -1240,12 +1240,15 @@ export default function PrintStudio() {
                           checked={group.numberImages === true}
                           style={{ accentColor: group.color }}
                           aria-label={`Print small numbers on ${group.name} images`}
-                          onChange={(event) => setWorkspace((current) => ({
-                            ...current,
-                            groups: current.groups.map((candidate) => candidate.id === group.id
-                              ? { ...candidate, numberImages: event.target.checked }
-                              : candidate),
-                          }))}
+                          onChange={(event) => {
+                            const numberImages = event.currentTarget.checked;
+                            setWorkspace((current) => ({
+                              ...current,
+                              groups: current.groups.map((candidate) => candidate.id === group.id
+                                ? { ...candidate, numberImages }
+                                : candidate),
+                            }));
+                          }}
                         />
                         <span className="image-group-color" style={{ backgroundColor: group.color }} aria-hidden="true" />
                         <span>Print small numbers on {group.name} images</span>
@@ -1599,7 +1602,7 @@ export default function PrintStudio() {
             <DialogHeader>
               <DialogTitle>{previewImage.name}</DialogTitle>
               <DialogDescription>
-                {previewImage.width} × {previewImage.height} px · original image · Page {previewImage.page} · {currentPaper.label} · {previewImageMetrics?.orientation ?? "Portrait"}
+                {previewImage.width} × {previewImage.height} px · original image · Page {previewImage.page} · {currentPaper.label} · {previewImageMetrics?.orientation === "landscape" ? "Landscape" : "Portrait"}
               </DialogDescription>
             </DialogHeader>
             <div className="image-preview-navigation">

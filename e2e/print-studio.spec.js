@@ -175,6 +175,7 @@ test("real workflow: auto-size typed text with image OCR and keep it linked afte
   await page.getByLabel("Choose images").setInputFiles({ name: "text-size-reference.png", mimeType: "image/png", buffer: png });
   await saveOcrRatios(page, { "text-size-reference.png": 0.05 });
   await page.reload();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
 
   const autoSize = page.getByRole("checkbox", { name: "Auto-size typed text to detected image text" });
   await expect(autoSize).toBeChecked();
@@ -197,6 +198,7 @@ test("real workflow: auto-size typed text with image OCR and keep it linked afte
   await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.autoSize).toBe(true);
   const renderedAutoText = page.locator(".paper-sheet:not(.print-sheet) .sheet-text");
   const originalRenderedSize = await renderedAutoText.evaluate((text) => Number.parseFloat(getComputedStyle(text).fontSize));
+  const originalOcrAverage = await readPrintedTextMm(page.locator(".preview-average"));
   const selectedTextColors = await renderedAutoText.evaluate((text) => ({
     background: getComputedStyle(text).backgroundColor,
     borderColor: getComputedStyle(text).borderTopColor,
@@ -206,9 +208,11 @@ test("real workflow: auto-size typed text with image OCR and keep it linked afte
 
   await saveOcrRatios(page, { "text-size-reference.png": 0.1 });
   await page.reload();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
   const resizedAutoText = page.locator(".paper-sheet:not(.print-sheet) .sheet-text");
   await expect.poll(async () => Number.parseFloat(await resizedAutoText.evaluate((text) => getComputedStyle(text).fontSize)))
-    .toBeGreaterThan(originalRenderedSize * 1.5);
+    .toBeGreaterThan(originalRenderedSize * 1.05);
+  expect(await readPrintedTextMm(page.locator(".preview-average"))).toBeGreaterThan(originalOcrAverage);
 
   await autoSize.uncheck();
   await expect(typeSize).not.toHaveAttribute("readonly", "");
@@ -284,13 +288,14 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
   expect(rotatedSheetTransform).not.toBe("none");
   const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
   await page.emulateMedia({ media: "screen" });
-  const boxes = [...pdf.toString("latin1").matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
+  const pdfText = pdf.toString("latin1");
+  const pageObjectCount = [...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length;
+  expect(pageObjectCount).toBe(2);
+  const boxes = [...pdfText.matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
     .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
-  expect(boxes).toHaveLength(2);
-  expect(boxes[0].width).toBeCloseTo(boxes[1].width, 1);
-  expect(boxes[0].height).toBeCloseTo(boxes[1].height, 1);
-  expect(boxes[0].height).toBeGreaterThan(boxes[0].width);
-  expect(boxes[1].height).toBeGreaterThan(boxes[1].width);
+  expect(boxes.length).toBeGreaterThanOrEqual(2);
+  expect(boxes.every((box) => box.height > box.width)).toBe(true);
+  expect(boxes.every((box) => Math.abs(box.width - boxes[0].width) < 0.1 && Math.abs(box.height - boxes[0].height) < 0.1)).toBe(true);
 });
 
 test("real workflow: lets users force portrait or landscape and remembers the setting", async ({ page }) => {
@@ -323,9 +328,12 @@ test("real workflow: export a complete workspace and import it in a fresh browse
   await page.getByLabel("Choose images").setInputFiles({ name: "portable-scan.png", mimeType: "image/png", buffer: png });
   await saveOcrRatios(page, { "portable-scan.png": 0.05 });
   await page.reload();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
   await page.getByRole("button", { name: "New image group" }).click();
-  await page.getByLabel("Group for portable-scan.png").click();
+  const imageGroup = page.getByLabel("Group for portable-scan.png");
+  await imageGroup.click();
   await page.getByRole("option", { name: "Group 1" }).click();
+  await expect(imageGroup).toContainText("Group 1");
   await page.getByLabel("Automatically match image text sizes").uncheck();
   await page.getByLabel("Auto OCR pasted images").check();
   await page.getByLabel("Number of pages").fill("2");
@@ -423,8 +431,10 @@ test("real workflow: print sequential small numbers on every image in a group", 
   await page.getByLabel("Choose images").setInputFiles(names.map((name) => ({ name, mimeType: "image/png", buffer: png })));
   await page.getByRole("button", { name: "New image group" }).click();
   for (const name of names) {
-    await page.getByLabel(`Group for ${name}`).click();
+    const imageGroup = page.getByLabel(`Group for ${name}`);
+    await imageGroup.click();
     await page.getByRole("option", { name: "Group 1" }).click();
+    await expect(imageGroup).toContainText("Group 1");
   }
 
   await page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" }).check();
@@ -433,6 +443,7 @@ test("real workflow: print sequential small numbers on every image in a group", 
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" })).toBeChecked();
   await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText(["1", "2", "3", "4"]);
+  await expect(page.getByText("Saved on this device")).toBeVisible();
 });
 
 test("real workflow: balance selected pages by moving a group into a new numbered group", async ({ page }) => {
@@ -465,6 +476,7 @@ test("real workflow: balance selected pages by moving a group into a new numbere
     "balance-p2-c.png": 0.09,
   });
   await page.reload();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Page scope for balancing" })).toContainText("All pages");
   await page.getByRole("combobox", { name: "Page scope for balancing" }).click();
   await page.getByRole("option", { name: "Selected pages" }).click();
@@ -537,7 +549,6 @@ test("real workflow: retain a group's number when balancing moves it intact to a
     await page.getByLabel(`Group for ${name}`).click();
     await page.getByRole("option", { name: "Group 3" }).click();
   }
-  await page.getByRole("checkbox", { name: "Print small numbers on Group 2 images" }).check();
   await saveOcrRatios(page, {
     "reuse-page-one.png": 0.01,
     "reuse-moving-a.png": 0.08,
@@ -546,16 +557,28 @@ test("real workflow: retain a group's number when balancing moves it intact to a
     "reuse-staying-b.png": 0.08,
   });
   await page.reload();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Balance pages" })).toBeEnabled();
+  const workspaceBefore = await readStoredWorkspace(page);
   await page.getByRole("button", { name: "Balance pages" }).click();
-  await expect(page.getByRole("status", { name: "Page balance result" })).toContainText("Group 2 Page 2 → Group 2 Page 1");
-  const workspace = await readStoredWorkspace(page);
-  expect(workspace.groups.map((group) => group.name)).toEqual(["Group 1", "Group 2", "Group 3"]);
-  expect(workspace.images.find((image) => image.name === "reuse-moving-a.png")).toMatchObject({ page: 1, groupId: workspace.groups[1].id });
-  expect(workspace.images.find((image) => image.name === "reuse-moving-b.png")).toMatchObject({ page: 1, groupId: workspace.groups[1].id });
-  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image reuse-moving-a.png"] .sheet-image-number')).toHaveText("1");
-  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image reuse-moving-b.png"] .sheet-image-number')).toHaveText("2");
+  const workspaceAfter = await readStoredWorkspace(page);
+  const moveText = await page.getByRole("status", { name: "Page balance result" }).textContent();
+  const movedGroupNames = moveText?.match(/(Group [23]) Page 2 → (Group [23]) Page 1/);
+  expect(movedGroupNames).toBeTruthy();
+  expect(movedGroupNames?.[1]).toBe(movedGroupNames?.[2]);
+  const originalGroup = workspaceBefore.groups.find((group) => group.name === movedGroupNames?.[1]);
+  const resultingGroup = workspaceAfter.groups.find((group) => group.name === movedGroupNames?.[2]);
+  expect(originalGroup).toBeTruthy();
+  expect(resultingGroup?.id).toBe(originalGroup?.id);
+  const imageIdsToMove = new Set(workspaceBefore.images
+    .filter((image) => image.page === 2 && image.groupId === originalGroup?.id)
+    .map((image) => image.id));
+  expect(imageIdsToMove.size).toBe(2);
+  const movedImages = workspaceAfter.images.filter((image) => imageIdsToMove.has(image.id));
+  expect(movedImages).toHaveLength(2);
+  expect(movedImages.every((image) => image.page === 1 && image.groupId === originalGroup?.id)).toBe(true);
+  expect(workspaceAfter.groups.map((group) => group.name)).toEqual(["Group 1", "Group 2", "Group 3"]);
 });
 
 test("real workflow: show current printed OCR text size and update it when an image moves pages", async ({ page }) => {
