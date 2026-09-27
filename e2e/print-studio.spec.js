@@ -55,6 +55,24 @@ test("real workflow: delete an image and keep it deleted after reload", async ({
   await expect(page.getByText("Items added to this page will appear here.")).toBeVisible();
 });
 
+test("real workflow: move an image to another page and restore the assignment after reload", async ({ page }) => {
+  await openStudio(page);
+  await page.getByLabel("Choose images").setInputFiles({ name: "move-me.png", mimeType: "image/png", buffer: png });
+  await page.getByLabel("Number of pages").fill("2");
+  await page.getByLabel("Page for move-me.png").click();
+  await page.getByRole("option", { name: "Page 2" }).click();
+  await page.getByRole("button", { name: "Page 2" }).click();
+  await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
+  await expect(page.getByText("Page 2 items")).toBeVisible();
+  await page.getByRole("button", { name: "Page 1" }).click();
+  await expect(page.getByRole("button", { name: "Select move-me.png" })).toHaveCount(0);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Page 2" }).click();
+  await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
+  await expect(page.getByLabel("Page for move-me.png")).toContainText("Page 2");
+});
+
 test("real workflow: import Page folders, then download a ZIP with those folders", async ({ page }) => {
   await openStudio(page);
   const archive = zipSync({
@@ -88,4 +106,35 @@ test("real workflow: import Page folders, then download a ZIP with those folders
     "Page 2/second.png",
     "Page 3/",
   ]);
+});
+
+test("real workflow: OCR text and resize images to match their printed letter height", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openStudio(page);
+  const makeTextImage = async (text, fontSize) => {
+    const dataUrl = await page.evaluate(({ content, size }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 800;
+      canvas.height = 240;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#111";
+      context.font = `bold ${size}px Arial`;
+      context.fillText(content, 24, 160);
+      return canvas.toDataURL("image/png");
+    }, { content: text, size: fontSize });
+    return Buffer.from(dataUrl.split(",")[1], "base64");
+  };
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "large-copy.png", mimeType: "image/png", buffer: await makeTextImage("LARGE", 80) },
+    { name: "small-copy.png", mimeType: "image/png", buffer: await makeTextImage("SMALL", 24) },
+  ]);
+  await expect(page.getByRole("button", { name: "Select image large-copy.png" })).toBeVisible();
+  await page.getByRole("button", { name: "Match text size" }).click();
+  await expect(page.getByRole("alert")).toContainText("Matched text size in 2 of 2 images.", { timeout: 120_000 });
+
+  const large = await page.getByRole("button", { name: "Select image large-copy.png" }).boundingBox();
+  const small = await page.getByRole("button", { name: "Select image small-copy.png" }).boundingBox();
+  expect(small.height).toBeGreaterThan(large.height * 1.5);
 });

@@ -195,7 +195,7 @@ button { cursor: pointer; }
 .dropzone p button { padding: 0; border: 0; color: #526c16; background: transparent; font-size: 14px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 .dropzone > span:last-of-type { color: #617177; font-size: 13px; }
 .file-input { display: none; }
-.archive-actions { display: flex; gap: 8px; margin-top: 5px; }
+.archive-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; }
 .target-page-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
 .target-select { width: 122px; height: 36px; background: #fff; }
 .storage-note { margin: 11px 0 0; color: #66767a; font-size: 13px; line-height: 1.45; }
@@ -222,6 +222,7 @@ button { cursor: pointer; }
 .delete-item { color: #617276; }
 .delete-item:hover { color: #a3322b; background: #f8e8e4; }
 .error-message { margin: 13px 18px 17px; padding: 10px 11px; border: 1px solid #ebc9be; border-radius: 8px; color: #873d31; background: #fff5f0; font-size: 14px; line-height: 1.4; }
+.error-message.success-message { border-color: #c9d8a9; color: #3d5c24; background: #f4f8e9; }
 
 .preview-panel { min-width: 0; overflow: hidden; border: 1px solid #d6e0e2; border-radius: 13px; background: #f8faf9; box-shadow: 0 5px 20px rgb(20 39 46 / 4%); }
 .preview-topline { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 18px 22px 13px; }

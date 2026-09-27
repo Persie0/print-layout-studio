@@ -7,6 +7,7 @@ export type StoredImage = {
   page: number;
   width: number;
   height: number;
+  textHeightRatio?: number;
   blob: Blob;
 };
 
@@ -99,7 +100,11 @@ export async function loadWorkspace(): Promise<Workspace | null> {
     pageCount: Math.max(1, Math.min(30, Number(record.pageCount) || 1)),
     images: metadata.flatMap((image) => {
       const blob = byId.get(image.id);
-      return blob ? [{ ...image, blob }] : [];
+      return blob ? [{
+        ...image,
+        textHeightRatio: Number.isFinite(Number(image.textHeightRatio)) ? Number(image.textHeightRatio) : undefined,
+        blob,
+      }] : [];
     }),
     texts: Array.isArray(record.texts) ? record.texts as StoredText[] : [],
   };
@@ -113,7 +118,9 @@ export async function saveWorkspace(workspace: Workspace): Promise<void> {
   transaction.objectStore("workspace").put({
     id: WORKSPACE_ID,
     ...settings,
-    images: images.map(({ id, name, page, width, height }) => ({ id, name, page, width, height })),
+    images: images.map(({ id, name, page, width, height, textHeightRatio }) => ({
+      id, name, page, width, height, textHeightRatio,
+    })),
   });
   for (const image of images) imageStore.put({ id: image.id, blob: image.blob });
   await transactionResult(transaction);

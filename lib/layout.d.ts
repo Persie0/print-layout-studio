@@ -3,6 +3,7 @@ export type LayoutItem = {
   type: "image" | "text";
   width: number;
   height: number;
+  scaleFactor?: number;
 };
 
 export type LayoutPlacement = {
