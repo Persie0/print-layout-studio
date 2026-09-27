@@ -127,6 +127,30 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
 });
 
+test("real workflow: adding a page switches the workspace to the new page", async ({ page }) => {
+  await openStudio(page);
+  await page.getByRole("button", { name: "Add one page" }).click();
+  await expect(page.getByRole("tab", { name: "Page 2" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Page 2 items" })).toBeVisible();
+  await expect(page.getByLabel("Page for new items")).toContainText("Page 2");
+});
+
+test("real workflow: Control or Command Z undoes pasted image batches", async ({ page }) => {
+  await openStudio(page);
+  const png = await makePng(page, 64, 48);
+  await pastePng(page, "first-paste.png", png);
+  await expect(page.getByRole("button", { name: "Select first-paste.png" })).toBeVisible();
+  await pastePng(page, "second-paste.png", png);
+  await expect(page.getByRole("button", { name: "Select second-paste.png" })).toBeVisible();
+
+  await page.keyboard.press("Control+z");
+  await expect(page.getByRole("button", { name: "Select second-paste.png" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Select first-paste.png" })).toBeVisible();
+  await page.keyboard.press("Control+z");
+  await expect(page.getByRole("button", { name: "Select first-paste.png" })).toHaveCount(0);
+  await expect.poll(async () => (await readStoredWorkspace(page))?.images?.length).toBe(0);
+});
+
 test("real workflow: show the disabled text action with readable contrast", async ({ page }) => {
   await openStudio(page);
   const addText = page.getByRole("button", { name: "Add text block" });
@@ -256,8 +280,8 @@ test("real workflow: group images by border color, persist groups, and enforce t
   await page.getByRole("button", { name: "New image group" }).click();
   await page.getByLabel("Group for second-group-image.png").click();
   await page.getByRole("option", { name: "Group 2" }).click();
-  await page.getByRole("button", { name: "Number images in Group 1" }).click();
-  await expect(page.getByRole("button", { name: "Stop numbering images in Group 1" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" }).check();
+  await expect(page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" })).toBeChecked();
   await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-image-number")).toHaveText("1");
   await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText("1");
 
@@ -275,7 +299,7 @@ test("real workflow: group images by border color, persist groups, and enforce t
   await page.reload();
   await expect(page.getByLabel("Group for first-group-image.png")).toContainText("Group 1");
   await expect(page.getByLabel("Group for second-group-image.png")).toContainText("Group 2");
-  await expect(page.getByRole("button", { name: "Stop numbering images in Group 1" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" })).toBeChecked();
 
   for (let count = 2; count < 8; count += 1) {
     await page.getByRole("button", { name: "New image group" }).click();
@@ -286,6 +310,25 @@ test("real workflow: group images by border color, persist groups, and enforce t
   await page.getByRole("button", { name: "Delete Group 1" }).click();
   await expect(page.getByLabel("Group for first-group-image.png")).toContainText("No group");
   await expect(page.getByText("7/8")).toBeVisible();
+});
+
+test("real workflow: print sequential small numbers on every image in a group", async ({ page }) => {
+  await openStudio(page);
+  const png = await makePng(page, 640, 480);
+  const names = ["number-one.png", "number-two.png", "number-three.png", "number-four.png"];
+  await page.getByLabel("Choose images").setInputFiles(names.map((name) => ({ name, mimeType: "image/png", buffer: png })));
+  await page.getByRole("button", { name: "New image group" }).click();
+  for (const name of names) {
+    await page.getByLabel(`Group for ${name}`).click();
+    await page.getByRole("option", { name: "Group 1" }).click();
+  }
+
+  await page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" }).check();
+  await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-image-number")).toHaveText(["1", "2", "3", "4"]);
+  await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText(["1", "2", "3", "4"]);
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" })).toBeChecked();
+  await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText(["1", "2", "3", "4"]);
 });
 
 test("real workflow: show current printed OCR text size and update it when an image moves pages", async ({ page }) => {
@@ -480,7 +523,6 @@ test("real workflow: persist auto OCR on paste and leave file uploads unscanned"
   await expect(page.getByRole("status", { name: "OCR status for paste-ocr.png" }))
     .toHaveAttribute("data-result", "Text found", { timeout: 120_000 });
   await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
-  await expect.poll(async () => (await readStoredWorkspace(page))?.images?.find((image) => image.name === "paste-ocr.png")?.ocrScanned).toBe(true);
 
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();

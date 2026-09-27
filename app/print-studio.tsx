@@ -9,7 +9,6 @@ import {
   FileText,
   ImagePlus,
   Layers2,
-  ListOrdered,
   Download,
   Minus,
   Plus,
@@ -341,6 +340,7 @@ export default function PrintStudio() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const archiveInputRef = useRef<HTMLInputElement>(null);
   const imageUrlsRef = useRef<Map<string, string>>(new Map());
+  const pastedImageUndoRef = useRef<string[][]>([]);
   const previewStageRef = useRef<HTMLDivElement>(null);
   const panStartRef = useRef<{ pointerId: number; x: number; y: number; originX: number; originY: number } | null>(null);
   const ocrQueueRef = useRef<StoredImage[]>([]);
@@ -470,6 +470,13 @@ export default function PrintStudio() {
     setActivePage((current) => Math.min(current, count));
     setTargetPage((current) => Math.min(current, count));
   }, []);
+
+  const addPage = useCallback(() => {
+    const newPage = clampPageCount(workspace.pageCount + 1);
+    updatePageCount(newPage);
+    setActivePage(newPage);
+    setTargetPage(newPage);
+  }, [updatePageCount, workspace.pageCount]);
 
   const addFiles = useCallback(async (files: FileList | File[], assignedPages?: number[]) => {
     const candidates = Array.from(files).filter((file) => file.type.startsWith("image/"));
@@ -645,6 +652,7 @@ export default function PrintStudio() {
     if (files.length === 0) return;
     event.preventDefault();
     const addedImages = await addFiles(files);
+    if (addedImages.length > 0) pastedImageUndoRef.current.push(addedImages.map((image) => image.id));
     if (workspace.autoOcrOnPaste && addedImages.length > 0) {
       void scanImagesForText(addedImages);
     }
@@ -707,6 +715,28 @@ export default function PrintStudio() {
     if (selectedItemId === id) setSelectedItemId(null);
     if (previewImageId === id) setPreviewImageId(null);
   }, [previewImageId, selectedItemId]);
+
+  useEffect(() => {
+    const onUndoPaste = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== "z") return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+
+      let activeBatch: string[] | undefined;
+      while (!activeBatch && pastedImageUndoRef.current.length > 0) {
+        const candidate = pastedImageUndoRef.current.pop() ?? [];
+        const existingIds = new Set(workspace.images.map((image) => image.id));
+        const remaining = candidate.filter((id) => existingIds.has(id));
+        if (remaining.length > 0) activeBatch = remaining;
+      }
+      if (!activeBatch) return;
+
+      event.preventDefault();
+      activeBatch.forEach(deleteItem);
+    };
+    window.addEventListener("keydown", onUndoPaste);
+    return () => window.removeEventListener("keydown", onUndoPaste);
+  }, [deleteItem, workspace.images]);
 
   const saveText = useCallback(() => {
     const content = draftText.trim();
@@ -885,7 +915,7 @@ export default function PrintStudio() {
               onChange={(event) => updatePageCount(Number(event.target.value))}
               aria-label="Number of pages"
             />
-            <Button variant="outline" size="icon-sm" aria-label="Add one page" onClick={() => updatePageCount(workspace.pageCount + 1)} disabled={workspace.pageCount >= MAX_PAGES}>
+            <Button variant="outline" size="icon-sm" aria-label="Add one page" onClick={addPage} disabled={workspace.pageCount >= MAX_PAGES}>
               <Plus size={15} />
             </Button>
           </div>
@@ -1037,22 +1067,6 @@ export default function PrintStudio() {
                         <span className="image-group-color" style={{ backgroundColor: group.color }} aria-hidden="true" />
                         <span>{group.name}</span>
                         <Button
-                          variant={group.numberImages ? "secondary" : "outline"}
-                          size="sm"
-                          className="image-group-number-button"
-                          aria-label={`${group.numberImages ? "Stop numbering" : "Number"} images in ${group.name}`}
-                          aria-pressed={group.numberImages === true}
-                          title={group.numberImages ? "Hide image numbers" : "Show numbers on group images"}
-                          onClick={() => setWorkspace((current) => ({
-                            ...current,
-                            groups: current.groups.map((candidate) => candidate.id === group.id
-                              ? { ...candidate, numberImages: !candidate.numberImages }
-                              : candidate),
-                          }))}
-                        >
-                          <ListOrdered size={13} aria-hidden="true" /> Number
-                        </Button>
-                        <Button
                           variant="ghost"
                           size="icon-xs"
                           aria-label={`Delete ${group.name}`}
@@ -1062,6 +1076,26 @@ export default function PrintStudio() {
                           <Trash2 size={13} aria-hidden="true" />
                         </Button>
                       </div>
+                    ))}
+                  </div>
+                  <div className="image-group-numbering-list">
+                    {workspace.groups.map((group) => (
+                      <label className="image-group-numbering-option" key={`numbering-${group.id}`}>
+                        <input
+                          type="checkbox"
+                          checked={group.numberImages === true}
+                          style={{ accentColor: group.color }}
+                          aria-label={`Print small numbers on ${group.name} images`}
+                          onChange={(event) => setWorkspace((current) => ({
+                            ...current,
+                            groups: current.groups.map((candidate) => candidate.id === group.id
+                              ? { ...candidate, numberImages: event.target.checked }
+                              : candidate),
+                          }))}
+                        />
+                        <span className="image-group-color" style={{ backgroundColor: group.color }} aria-hidden="true" />
+                        <span>Print small numbers on {group.name} images</span>
+                      </label>
                     ))}
                   </div>
                   <p className="image-groups-note">Images in a group share its border color.</p>
