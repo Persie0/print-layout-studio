@@ -120,6 +120,37 @@ test("real workflow: import Page folders, then download a ZIP with those folders
   ]);
 });
 
+test("real workflow: preview the original image in a full-resolution popover", async ({ page }) => {
+  await openStudio(page);
+  const dataUrl = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 480;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#2684ff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  });
+  const image = Buffer.from(dataUrl.split(",")[1], "base64");
+  await page.getByLabel("Choose images").setInputFiles({
+    name: "original-size.png",
+    mimeType: "image/png",
+    buffer: image,
+  });
+
+  await page.getByRole("button", { name: "Preview full image original-size.png" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "original-size.png" })).toBeVisible();
+  const fullImage = dialog.getByRole("img", { name: "original-size.png" });
+  await expect(fullImage).toBeVisible();
+  await expect.poll(() => fullImage.evaluate((element) => [element.naturalWidth, element.naturalHeight])).toEqual([640, 480]);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "Select original-size.png" }).click();
+  await expect(page.getByRole("button", { name: "Select image original-size.png" })).toBeVisible();
+});
+
 test("real workflow: OCR text and resize images to match their printed letter height", async ({ page }) => {
   test.setTimeout(120_000);
   await openStudio(page);
@@ -146,8 +177,20 @@ test("real workflow: OCR text and resize images to match their printed letter he
   await expect(page.getByRole("button", { name: "Select image large-copy.png" })).toBeVisible();
   await page.getByRole("button", { name: "Match text size" }).click();
   await expect(page.getByRole("alert")).toContainText("Matched text size in 2 of 2 images.", { timeout: 120_000 });
+  const largeOcrStatus = page.getByRole("status", { name: "OCR status for large-copy.png" });
+  const smallOcrStatus = page.getByRole("status", { name: "OCR status for small-copy.png" });
+  await expect(largeOcrStatus).toHaveText("Text found");
+  await expect(smallOcrStatus).toHaveText("Text found");
 
   const large = await page.getByRole("button", { name: "Select image large-copy.png" }).boundingBox();
   const small = await page.getByRole("button", { name: "Select image small-copy.png" }).boundingBox();
   expect(small.height).toBeGreaterThan(large.height * 1.5);
+
+  await page.reload();
+  await expect(page.getByRole("status", { name: "OCR status for large-copy.png" })).toHaveText("Text found");
+  await page.getByRole("button", { name: "Match text size" }).click();
+  await expect(page.getByRole("alert")).toContainText("All images were already scanned");
+  await page.getByRole("button", { name: "Rescan OCR for small-copy.png" }).click();
+  await expect(page.getByRole("alert")).toContainText("Rescanned small-copy.png. Text-size data updated.", { timeout: 120_000 });
+  await expect(page.getByRole("status", { name: "OCR status for small-copy.png" })).toHaveText("Text found");
 });
