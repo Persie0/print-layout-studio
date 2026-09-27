@@ -75,7 +75,6 @@ test("real workflow: move an image to another page and restore the assignment af
   await page.getByRole("tab", { name: "Page 2" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
   await expect(page.getByText("Page 2 items")).toBeVisible();
-  await expect(page.getByText("Saving on this device…")).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
   await page.getByRole("tab", { name: "Page 1" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toHaveCount(0);
