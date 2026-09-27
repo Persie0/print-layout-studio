@@ -8,6 +8,7 @@ export type StoredImage = {
   width: number;
   height: number;
   textHeightRatio?: number;
+  ocrScanned?: boolean;
   blob: Blob;
 };
 
@@ -103,6 +104,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
       return blob ? [{
         ...image,
         textHeightRatio: Number.isFinite(Number(image.textHeightRatio)) ? Number(image.textHeightRatio) : undefined,
+        ocrScanned: image.ocrScanned === true,
         blob,
       }] : [];
     }),
@@ -118,8 +120,8 @@ export async function saveWorkspace(workspace: Workspace): Promise<void> {
   transaction.objectStore("workspace").put({
     id: WORKSPACE_ID,
     ...settings,
-    images: images.map(({ id, name, page, width, height, textHeightRatio }) => ({
-      id, name, page, width, height, textHeightRatio,
+    images: images.map(({ id, name, page, width, height, textHeightRatio, ocrScanned }) => ({
+      id, name, page, width, height, textHeightRatio, ocrScanned,
     })),
   });
   for (const image of images) imageStore.put({ id: image.id, blob: image.blob });
