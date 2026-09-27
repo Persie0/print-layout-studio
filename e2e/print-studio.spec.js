@@ -164,6 +164,28 @@ test("real workflow: auto-rotate each sheet for its photos and print both paper 
   expect(boxes[1].height).toBeGreaterThan(boxes[1].width);
 });
 
+test("real workflow: lets users force portrait or landscape and remembers the setting", async ({ page }) => {
+  await page.goto("/");
+
+  const orientation = page.getByRole("combobox", { name: "Orientation" });
+  await orientation.click();
+  await page.getByRole("option", { name: "Landscape" }).click();
+  await expect(page.locator(".paper-sheet")).toHaveAttribute("data-orientation", "landscape");
+  await expect(page.locator(".preview-spec")).toContainText("Landscape");
+
+  await page.reload();
+  await expect(page.getByRole("combobox", { name: "Orientation" })).toContainText("Landscape");
+  await expect(page.locator(".paper-sheet")).toHaveAttribute("data-orientation", "landscape");
+
+  await page.getByRole("combobox", { name: "Orientation" }).click();
+  await page.getByRole("option", { name: "Portrait" }).click();
+  await expect(page.locator(".paper-sheet")).toHaveAttribute("data-orientation", "portrait");
+
+  await page.getByRole("combobox", { name: "Orientation" }).click();
+  await page.getByRole("option", { name: "Auto" }).click();
+  await expect(page.getByRole("combobox", { name: "Orientation" })).toContainText("Auto");
+});
+
 test("real workflow: group images by border color, persist groups, and enforce the color limit", async ({ page }) => {
   await openStudio(page);
   const firstImage = await makePng(page, 640, 480);

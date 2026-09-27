@@ -20,6 +20,7 @@ export type PageLayoutChoice = {
 export function choosePageLayout(input: {
   portraitSize: PageSize;
   landscapeSize: PageSize;
+  orientation?: "auto" | "portrait" | "landscape";
   margin?: number;
   gap?: number;
   imageBorder?: number;

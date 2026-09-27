@@ -36,6 +36,7 @@ import type { PaperFormat } from "@/lib/paper-formats";
 
 const EMPTY_WORKSPACE: Workspace = {
   paper: "a4",
+  orientation: "auto",
   marginMm: 4,
   borderMm: 1,
   gapMm: 2,
@@ -129,6 +130,7 @@ function calculatePage(workspace: Workspace, pageNumber: number, imageScaleFacto
   const choice = choosePageLayout({
     portraitSize,
     landscapeSize,
+    orientation: workspace.orientation,
     margin,
     gap: Math.max(0, workspace.gapMm) * PT_PER_MM,
     imageBorder: Math.max(0, workspace.borderMm) * PT_PER_MM,
@@ -783,7 +785,21 @@ export default function PrintStudio() {
         </div>
         <div className="toolbar-field orientation-field">
           <label>Orientation</label>
-          <span className="orientation-value">Auto per page</span>
+          <Select
+            value={workspace.orientation}
+            onValueChange={(value) => {
+              if (value === "auto" || value === "portrait" || value === "landscape") {
+                setWorkspace((current) => ({ ...current, orientation: value }));
+              }
+            }}
+          >
+            <SelectTrigger className="toolbar-select" aria-label="Orientation"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Auto</SelectItem>
+              <SelectItem value="portrait">Portrait</SelectItem>
+              <SelectItem value="landscape">Landscape</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <div className="toolbar-field page-count-field">
           <label htmlFor="page-count">Pages</label>
@@ -1132,7 +1148,7 @@ export default function PrintStudio() {
               <h1>Arrange your pages</h1>
             </div>
             <div className="preview-actions">
-              <div className="preview-spec">{currentPaper.label} · Auto {activeMetrics.orientation} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+              <div className="preview-spec">{currentPaper.label} · {workspace.orientation === "auto" ? `Auto · ${activeMetrics.orientation}` : workspace.orientation[0].toUpperCase() + workspace.orientation.slice(1)} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
               <div className="zoom-controls" aria-label="Page zoom controls">
                 <Button variant="outline" size="icon-sm" aria-label="Zoom out" onClick={() => changePreviewZoom(1 / 1.25)} disabled={previewZoom <= 0.5}>
                   <Minus size={15} aria-hidden="true" />

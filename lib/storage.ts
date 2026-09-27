@@ -25,6 +25,7 @@ export type StoredText = {
 
 export type Workspace = {
   paper: PaperFormat;
+  orientation: "auto" | "portrait" | "landscape";
   marginMm: number;
   borderMm: number;
   gapMm: number;
@@ -101,6 +102,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
   const groupIds = new Set(groups.map((group) => group.id));
   return {
     paper: isPaperFormat(record.paper) ? record.paper : "a4",
+    orientation: record.orientation === "portrait" || record.orientation === "landscape" ? record.orientation : "auto",
     marginMm: Number(record.marginMm) || 4,
     borderMm: Number.isFinite(storedBorderMm) ? Math.max(0, Math.min(10, storedBorderMm)) : 1,
     gapMm: Number.isFinite(storedGapMm) ? Math.max(0, Math.min(20, storedGapMm)) : 2,
