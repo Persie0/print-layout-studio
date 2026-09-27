@@ -20,10 +20,11 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { readImageDimensions } from "@/lib/image-dimensions";
 import { createId } from "@/lib/ids";
 import { layoutPage } from "@/lib/layout";
-import { estimateTextHeightRatio, getTextMatchScaleFactors } from "@/lib/text-matching";
+import { estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
 import { createPageArchive, readPageArchive } from "@/lib/page-archive";
 import { getPageSize, getPrintPageName, PAPER_FORMATS } from "@/lib/paper-formats";
 import { loadWorkspace, removeStoredImage, saveWorkspace } from "@/lib/storage";
@@ -251,6 +252,7 @@ export default function PrintStudio() {
   const [activePage, setActivePage] = useState(1);
   const [targetPage, setTargetPage] = useState(1);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
   const [draftFontSize, setDraftFontSize] = useState(16);
   const [dragging, setDragging] = useState(false);
@@ -314,6 +316,7 @@ export default function PrintStudio() {
   const activeImages = workspace.images.filter((image) => image.page === activePage);
   const activeTexts = workspace.texts.filter((text) => text.page === activePage);
   const selectedText = workspace.texts.find((text) => text.id === selectedItemId) ?? null;
+  const previewImage = workspace.images.find((image) => image.id === previewImageId) ?? null;
 
   const updatePageCount = useCallback((rawValue: number) => {
     const count = clampPageCount(rawValue);
@@ -402,8 +405,8 @@ export default function PrintStudio() {
     }
   }, [workspace.images, workspace.pageCount]);
 
-  const matchTextSizes = useCallback(async () => {
-    if (workspace.images.length === 0 || ocrRunning) return;
+  const scanImagesForText = useCallback(async (imagesToScan: StoredImage[], manualRescan = false) => {
+    if (imagesToScan.length === 0 || ocrRunning) return;
     setOcrRunning(true);
     setOcrProgress("Loading English OCR…");
     setErrorMessage("");
@@ -416,8 +419,8 @@ export default function PrintStudio() {
         },
       });
       const ratios = new Map<string, number | null>();
-      for (const [index, image] of workspace.images.entries()) {
-        setOcrProgress(`Reading image ${index + 1} of ${workspace.images.length}…`);
+      for (const [index, image] of imagesToScan.entries()) {
+        setOcrProgress(`Reading image ${index + 1} of ${imagesToScan.length}…`);
         const bitmap = await createImageBitmap(image.blob);
         try {
           const shrink = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
@@ -439,14 +442,22 @@ export default function PrintStudio() {
       setWorkspace((current) => ({
         ...current,
         images: current.images.map((image) => {
+          if (!ratios.has(image.id)) return image;
           const ratio = ratios.get(image.id);
-          return ratio ? { ...image, textHeightRatio: ratio } : image;
+          return { ...image, ocrScanned: true, textHeightRatio: ratio ?? undefined };
         }),
       }));
-      const recognizedCount = [...ratios.values()].filter(Boolean).length;
-      setErrorMessage(recognizedCount > 0
-        ? `Matched text size in ${recognizedCount} of ${ratios.size} images.`
-        : "No readable text found. Images keep their current sizes.");
+      if (manualRescan) {
+        setErrorMessage(`Rescanned ${imagesToScan[0].name}. Text-size data updated.`);
+      } else {
+        const nextImages = workspace.images.map((image) => ratios.has(image.id)
+          ? { ...image, ocrScanned: true, textHeightRatio: ratios.get(image.id) ?? undefined }
+          : image);
+        const recognizedCount = nextImages.filter((image) => Number(image.textHeightRatio) > 0).length;
+        setErrorMessage(recognizedCount > 0
+          ? `Matched text size in ${recognizedCount} of ${nextImages.length} images.`
+          : "No readable text found. Images keep their current sizes.");
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? `Text detection failed: ${error.message}` : "Text detection failed.");
     } finally {
@@ -455,6 +466,20 @@ export default function PrintStudio() {
       setOcrProgress("");
     }
   }, [ocrRunning, workspace.images]);
+
+  const matchTextSizes = useCallback(() => {
+    if (workspace.images.length === 0 || ocrRunning) return;
+    const unscannedImages = getUnscannedImages(workspace.images);
+    if (unscannedImages.length === 0) {
+      setErrorMessage("All images were already scanned. Use an image's Rescan OCR button to scan it again.");
+      return;
+    }
+    void scanImagesForText(unscannedImages);
+  }, [ocrRunning, scanImagesForText, workspace.images]);
+
+  const rescanImageText = useCallback((image: StoredImage) => {
+    void scanImagesForText([image], true);
+  }, [scanImagesForText]);
 
   const onPaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -804,11 +829,17 @@ export default function PrintStudio() {
             ) : (
               <div className="item-list">
                 {activeImages.map((image) => (
-                  <div className={`item-row${selectedItemId === image.id ? " item-selected" : ""}`} key={image.id}>
-                    <button className="item-main" type="button" onClick={() => onImageItemClick(image)} aria-label={`Select ${image.name}`}>
+                  <div className={`item-row image-item-row${selectedItemId === image.id ? " item-selected" : ""}`} key={image.id}>
+                    <button className="item-thumb-preview" type="button" onClick={() => setPreviewImageId(image.id)} aria-label={`Preview full image ${image.name}`} title="View full image">
                       <span className="item-thumb"><PageImage image={image} src={imageUrls.get(image.id)} /></span>
-                      <span className="item-name">{image.name}</span>
                     </button>
+                    <button className="item-main" type="button" onClick={() => onImageItemClick(image)} aria-label={`Select ${image.name}`}>
+                      <span className="item-name">{image.name}</span>
+                      <span className="ocr-flag" role="status" aria-label={`OCR status for ${image.name}`} data-result={getOcrStatusLabel(image)} title={getOcrStatusLabel(image)}>
+                        {getOcrStatusLabel(image) === "Text found" ? "OCR ✓" : getOcrStatusLabel(image) === "No text found" ? "OCR —" : "OCR ?"}
+                      </span>
+                    </button>
+                    <Button variant="ghost" size="icon-xs" className="rescan-ocr" aria-label={`Rescan OCR for ${image.name}`} title="Rescan OCR" disabled={ocrRunning} onClick={() => rescanImageText(image)}><RotateCw size={14} /></Button>
                     <Select value={String(image.page)} onValueChange={(value) => assignItem(image.id, Number(value))}>
                       <SelectTrigger className="item-page-select" aria-label={`Page for ${image.name}`}><SelectValue /></SelectTrigger>
                       <SelectContent>{pageOptions.map((page) => <SelectItem key={page} value={String(page)}>Page {page}</SelectItem>)}</SelectContent>
@@ -893,6 +924,22 @@ export default function PrintStudio() {
           />
         ))}
       </div>
+
+      <Dialog open={previewImage !== null} onOpenChange={(open) => {
+        if (!open) setPreviewImageId(null);
+      }}>
+        {previewImage ? (
+          <DialogContent className="image-preview-dialog">
+            <DialogHeader>
+              <DialogTitle>{previewImage.name}</DialogTitle>
+              <DialogDescription>{previewImage.width} × {previewImage.height} px · original image</DialogDescription>
+            </DialogHeader>
+            <div className="full-image-preview">
+              <img src={imageUrls.get(previewImage.id)} alt={previewImage.name} />
+            </div>
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </div>
   );
 }
