@@ -127,6 +127,52 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
 });
 
+test("real workflow: show the disabled text action with readable contrast", async ({ page }) => {
+  await openStudio(page);
+  const addText = page.getByRole("button", { name: "Add text block" });
+  await expect(addText).toBeDisabled();
+  const colors = await addText.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { foreground: style.color, background: style.backgroundColor };
+  });
+  expect(colors).toEqual({ foreground: "rgb(67, 84, 90)", background: "rgb(228, 234, 231)" });
+});
+
+test("real workflow: auto-size typed text to the median detected image text", async ({ page }) => {
+  await openStudio(page);
+  const png = await makePng(page, 900, 900);
+  await page.getByLabel("Choose images").setInputFiles({ name: "text-size-reference.png", mimeType: "image/png", buffer: png });
+  await saveOcrRatios(page, { "text-size-reference.png": 0.05 });
+  await page.reload();
+
+  const autoSize = page.getByRole("checkbox", { name: "Match typed text to image text size" });
+  await expect(autoSize).toBeChecked();
+  const typeSize = page.getByLabel("Type size");
+  await expect(typeSize).toHaveAttribute("readonly", "");
+  const matchedSize = Number(await typeSize.inputValue());
+  expect(matchedSize).toBeGreaterThan(8);
+  expect(matchedSize).toBeLessThan(72);
+
+  await page.getByLabel("Text block content").fill("Text sized to match the image");
+  await page.getByRole("button", { name: "Add text block" }).click();
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.fontSize).toBe(matchedSize);
+
+  await autoSize.uncheck();
+  await expect(typeSize).not.toHaveAttribute("readonly", "");
+});
+
+test("real workflow: remove an image from the full-resolution viewer", async ({ page }) => {
+  await openStudio(page);
+  const png = await makePng(page, 100, 60);
+  await page.getByLabel("Choose images").setInputFiles({ name: "remove-from-viewer.png", mimeType: "image/png", buffer: png });
+  await page.getByRole("button", { name: "Preview full image remove-from-viewer.png" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("button", { name: "Remove remove-from-viewer.png" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Remove remove-from-viewer.png" }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Select remove-from-viewer.png" })).toHaveCount(0);
+});
+
 test("real workflow: auto-rotate each sheet for its photos and print both paper orientations", async ({ page }) => {
   await openStudio(page);
   await page.getByLabel("Number of pages").fill("2");
@@ -322,9 +368,14 @@ test("real workflow: fit the whole sheet in the remaining viewport and zoom with
     await page.setViewportSize(viewport);
     await openStudio(page);
     const stage = page.locator(".paper-stage");
+    const previewPanel = page.locator(".preview-panel");
     const sheet = page.locator(".paper-sheet:not(.print-sheet)");
     await expect(page.locator(".zoom-level")).toHaveText("100%");
     await expect(sheet).toBeVisible();
+    await expect.poll(async () => {
+      const [panelBox, stageBox] = await Promise.all([previewPanel.boundingBox(), stage.boundingBox()]);
+      return panelBox && stageBox ? Math.abs(panelBox.y + panelBox.height - stageBox.y - stageBox.height) : Infinity;
+    }).toBeLessThanOrEqual(2);
     await expect.poll(async () => {
       const [stageBox, sheetBox] = await Promise.all([stage.boundingBox(), sheet.boundingBox()]);
       return Boolean(stageBox && sheetBox && sheetBox.x >= stageBox.x - 1 && sheetBox.y >= stageBox.y - 1

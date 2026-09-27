@@ -312,6 +312,7 @@ export default function PrintStudio() {
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
   const [draftFontSize, setDraftFontSize] = useState(16);
+  const [matchImageTextSize, setMatchImageTextSize] = useState(true);
   const [draftTextFormat, setDraftTextFormat] = useState<"plain" | "latex" | "markdown">("plain");
   const [splitTextOnBlankLines, setSplitTextOnBlankLines] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -399,6 +400,25 @@ export default function PrintStudio() {
     () => calculatePage(workspace, activePage, imageScaleFactors),
     [workspace, activePage, imageScaleFactors],
   );
+  const matchedTextFontSize = useMemo(() => {
+    const pageMetrics = targetPage === activePage
+      ? activeMetrics
+      : calculatePage(workspace, targetPage, imageScaleFactors);
+    const imageById = new Map(workspace.images.map((image) => [image.id, image]));
+    const printedHeights = pageMetrics.layout.placements.flatMap((placement) => {
+      if (placement.type !== "image") return [];
+      const image = imageById.get(placement.id);
+      const height = image ? estimatePrintedTextHeightMm(image, placement, workspace.borderMm) : null;
+      return height !== null ? [height] : [];
+    }).sort((a, b) => a - b);
+    if (!printedHeights.length) return null;
+    const middle = Math.floor(printedHeights.length / 2);
+    const medianHeightMm = printedHeights.length % 2
+      ? printedHeights[middle]
+      : (printedHeights[middle - 1] + printedHeights[middle]) / 2;
+    // Printed OCR boxes are roughly 70% of the CSS font size for typical text.
+    return Math.max(8, Math.min(72, Math.round(medianHeightMm * PT_PER_MM / 0.7)));
+  }, [activeMetrics, activePage, imageScaleFactors, targetPage, workspace]);
   const activeImages = workspace.images.filter((image) => image.page === activePage);
   const activeTexts = workspace.texts.filter((text) => text.page === activePage);
   const selectedText = workspace.texts.find((text) => text.id === selectedItemId) ?? null;
@@ -669,7 +689,8 @@ export default function PrintStudio() {
     }));
     void removeStoredImage(id).catch(() => undefined);
     if (selectedItemId === id) setSelectedItemId(null);
-  }, [selectedItemId]);
+    if (previewImageId === id) setPreviewImageId(null);
+  }, [previewImageId, selectedItemId]);
 
   const saveText = useCallback(() => {
     const content = draftText.trim();
@@ -677,7 +698,9 @@ export default function PrintStudio() {
       setErrorMessage("Write something before adding a text block.");
       return;
     }
-    const fontSize = Math.max(8, Math.min(72, Number(draftFontSize) || 16));
+    const fontSize = matchImageTextSize && matchedTextFontSize !== null
+      ? matchedTextFontSize
+      : Math.max(8, Math.min(72, Number(draftFontSize) || 16));
     setErrorMessage("");
     if (selectedText) {
       setWorkspace((current) => ({
@@ -695,13 +718,14 @@ export default function PrintStudio() {
       setActivePage(targetPage);
       setSelectedItemId(texts[0]?.id ?? null);
     }
-  }, [draftFontSize, draftText, draftTextFormat, selectedText, splitTextOnBlankLines, targetPage]);
+  }, [draftFontSize, draftText, draftTextFormat, matchImageTextSize, matchedTextFontSize, selectedText, splitTextOnBlankLines, targetPage]);
 
   const startNewText = useCallback(() => {
     setSelectedItemId(null);
     setDraftText("");
     setDraftFontSize(16);
     setDraftTextFormat("plain");
+    setMatchImageTextSize(true);
   }, []);
 
   const onImageItemClick = useCallback((image: StoredImage) => {
@@ -1068,7 +1092,8 @@ export default function PrintStudio() {
                   type="number"
                   min={8}
                   max={72}
-                  value={draftFontSize}
+                  value={matchImageTextSize && matchedTextFontSize !== null ? matchedTextFontSize : draftFontSize}
+                  readOnly={matchImageTextSize && matchedTextFontSize !== null}
                   onChange={(event) => setDraftFontSize(Math.max(8, Math.min(72, Number(event.target.value) || 8)))}
                 />
                 <span>pt</span>
@@ -1078,6 +1103,15 @@ export default function PrintStudio() {
                 {selectedText ? "Save text" : "Add text block"}
               </Button>
             </div>
+            <label className="match-text-size-toggle">
+              <input
+                type="checkbox"
+                checked={matchImageTextSize}
+                onChange={(event) => setMatchImageTextSize(event.target.checked)}
+                aria-label="Match typed text to image text size"
+              />
+              <span>{matchedTextFontSize === null ? "Match image text size (scan images first)" : `Match image text size (${matchedTextFontSize} pt)`}</span>
+            </label>
             <label className="split-text-toggle">
               <input
                 type="checkbox"
@@ -1166,6 +1200,7 @@ export default function PrintStudio() {
                       setTargetPage(text.page);
                       setDraftText(text.content);
                       setDraftFontSize(text.fontSize);
+                      setMatchImageTextSize(false);
                       setDraftTextFormat(text.format === "latex" || text.format === "markdown" ? text.format : "plain");
                     }} aria-label={`Edit text block: ${text.content.slice(0, 40)}`}>
                       <span className="item-text-icon"><FileText size={17} /></span>
@@ -1197,7 +1232,7 @@ export default function PrintStudio() {
             <div className="preview-actions">
               <div className="preview-summary">
                 <div className="preview-spec">{currentPaper.label} · {workspace.orientation === "auto" ? `Auto · ${activeMetrics.orientation}` : workspace.orientation[0].toUpperCase() + workspace.orientation.slice(1)} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
-                <div className="preview-average" role="status">Average printed text {averageTextHeightMm === null ? "—" : `≈ ${averageTextHeightMm.toFixed(1)} mm`}</div>
+                <div className="preview-average" role="status">Average printed text {averageTextHeightMm === null ? "—" : `≈ ${averageTextHeightMm.toFixed(1)} mm`} · {activeMetrics.layout.placements.length} placed</div>
               </div>
               <div className="zoom-controls" aria-label="Page zoom controls">
                 <Button variant="outline" size="icon-sm" aria-label="Zoom out" onClick={() => changePreviewZoom(1 / 1.25)} disabled={previewZoom <= 0.5}>
@@ -1248,10 +1283,6 @@ export default function PrintStudio() {
                 />
                 </div>
               </div>
-              <div className="preview-footer">
-                <span>Images keep their proportions · text prints at its chosen size</span>
-                {activeMetrics.layout.fits ? <span>{activeMetrics.layout.placements.length} placed</span> : <span className="warning-label">Check text size</span>}
-              </div>
             </TabsContent>
           </Tabs>
         </section>
@@ -1284,6 +1315,9 @@ export default function PrintStudio() {
                 <ChevronLeft size={16} aria-hidden="true" /> Previous
               </Button>
               <span className="image-preview-count">{workspace.images.findIndex((image) => image.id === previewImage.id) + 1} of {workspace.images.length} images</span>
+              <Button variant="destructive" size="sm" aria-label={`Remove ${previewImage.name}`} onClick={() => deleteItem(previewImage.id)}>
+                <Trash2 size={14} aria-hidden="true" /> Remove
+              </Button>
               <Button variant="outline" size="sm" aria-label="Next image" onClick={() => movePreviewImage(1)} disabled={workspace.images.length < 2}>
                 Next <ChevronRight size={16} aria-hidden="true" />
               </Button>
