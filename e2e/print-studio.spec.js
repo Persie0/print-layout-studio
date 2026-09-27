@@ -178,6 +178,8 @@ test("real workflow: OCR text and resize images to match their printed letter he
   await expect(page.getByRole("button", { name: "Select image large-copy.png" })).toBeVisible();
   await page.getByRole("button", { name: "Match text size" }).click();
   await expect(page.getByRole("alert")).toContainText("Matched text size in 2 of 2 images.", { timeout: 120_000 });
+  await expect(page.getByText("Saving on this device…")).toBeVisible();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
   const largeOcrStatus = page.getByRole("status", { name: "OCR status for large-copy.png" });
   const smallOcrStatus = page.getByRole("status", { name: "OCR status for small-copy.png" });
   await expect(largeOcrStatus).toHaveAttribute("data-result", "Text found");
@@ -194,4 +196,6 @@ test("real workflow: OCR text and resize images to match their printed letter he
   await page.getByRole("button", { name: "Rescan OCR for small-copy.png" }).click();
   await expect(page.getByRole("alert")).toContainText("Rescanned small-copy.png. Text-size data updated.", { timeout: 120_000 });
   await expect(page.getByRole("status", { name: "OCR status for small-copy.png" })).toHaveAttribute("data-result", "Text found");
+  await expect(page.getByText("Saving on this device…")).toBeVisible();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
 });
