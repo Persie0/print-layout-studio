@@ -20,7 +20,7 @@ export type StoredText = {
   page: number;
   content: string;
   fontSize: number;
-  format?: "plain" | "latex";
+  format?: "plain" | "latex" | "markdown";
 };
 
 export type Workspace = {
@@ -31,6 +31,7 @@ export type Workspace = {
   gapMm: number;
   pageCount: number;
   autoOcrOnPaste: boolean;
+  autoMatchTextSize: boolean;
   images: StoredImage[];
   texts: StoredText[];
   groups: ImageGroup[];
@@ -108,6 +109,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
     gapMm: Number.isFinite(storedGapMm) ? Math.max(0, Math.min(20, storedGapMm)) : 2,
     pageCount: Math.max(1, Math.min(30, Number(record.pageCount) || 1)),
     autoOcrOnPaste: record.autoOcrOnPaste === true,
+    autoMatchTextSize: record.autoMatchTextSize !== false,
     groups,
     images: metadata.flatMap((image) => {
       const blob = byId.get(image.id);
@@ -121,7 +123,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
     }),
     texts: Array.isArray(record.texts) ? (record.texts as StoredText[]).map((text) => ({
       ...text,
-      format: text.format === "latex" ? "latex" : "plain",
+      format: text.format === "latex" || text.format === "markdown" ? text.format : "plain",
     })) : [],
   };
 }

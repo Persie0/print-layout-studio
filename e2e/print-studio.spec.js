@@ -278,12 +278,51 @@ test("real workflow: render and persist LaTeX math on the print sheet", async ({
   expect(pdf.length).toBeGreaterThan(1000);
 });
 
+test("real workflow: render ChatGPT Markdown tables and arrange blank-line sections separately", async ({ page }) => {
+  await openStudio(page);
+  const addText = page.getByRole("button", { name: "Add text block" });
+  await expect(addText).toBeDisabled();
+  await expect(addText).toHaveCSS("background-color", "rgb(228, 234, 231)");
+  await expect(addText).toHaveCSS("color", "rgb(97, 114, 118)");
+
+  await page.getByLabel("Text block content").fill([
+    "## Logical forms",
+    "",
+    "| English wording | Logical form | Important note |",
+    "| --- | --- | --- |",
+    "| **P and Q** | \\(P\\land Q\\) | both true |",
+    "| P only if Q | $P\\to Q$ | scope matters |",
+    "",
+    "Raw HTML stays text: <img src=x onerror=alert(1)>",
+  ].join("\n"));
+  await page.getByLabel("Text format").click();
+  await page.getByRole("option", { name: "Markdown / ChatGPT answer" }).click();
+  await page.getByRole("checkbox", { name: "Split text at blank lines" }).check();
+  await page.getByRole("button", { name: "Add text block" }).click();
+
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.length).toBe(3);
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.every((text) => text.format === "markdown")).toBe(true);
+  const sheetBlocks = page.locator(".paper-sheet:not(.print-sheet) .sheet-text-markdown");
+  await expect(sheetBlocks).toHaveCount(3);
+  const tableBlock = sheetBlocks.filter({ has: page.locator("table") });
+  await expect(tableBlock.locator("th")).toHaveCount(3);
+  await expect(tableBlock.locator("strong")).toHaveText("P and Q");
+  await expect(tableBlock.locator(".katex")).toHaveCount(2);
+  await expect(tableBlock).toContainText("scope matters");
+  await expect(sheetBlocks.nth(2)).toContainText("Raw HTML stays text");
+  await expect(sheetBlocks.nth(2).locator("img")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-text-markdown table")).toBeVisible();
+});
+
 test("real workflow: fit the whole sheet in the remaining viewport and zoom without inner scrolling", async ({ page }) => {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     await openStudio(page);
     const stage = page.locator(".paper-stage");
     const sheet = page.locator(".paper-sheet:not(.print-sheet)");
+    await expect(page.locator(".zoom-level")).toHaveText("100%");
     await expect(sheet).toBeVisible();
     await expect.poll(async () => {
       const [stageBox, sheetBox] = await Promise.all([stage.boundingBox(), sheet.boundingBox()]);
@@ -291,8 +330,14 @@ test("real workflow: fit the whole sheet in the remaining viewport and zoom with
         && sheetBox.x + sheetBox.width <= stageBox.x + stageBox.width + 1
         && sheetBox.y + sheetBox.height <= stageBox.y + stageBox.height + 1);
     }).toBe(true);
-    await expect.poll(() => stage.evaluate((element) => element.scrollHeight <= element.clientHeight
-      && element.scrollWidth <= element.clientWidth)).toBe(true);
+    await expect.poll(async () => {
+      const [stageBox, sheetBox] = await Promise.all([stage.boundingBox(), sheet.boundingBox()]);
+      return Math.max(sheetBox.width / stageBox.width, sheetBox.height / stageBox.height) >= 0.97;
+    }).toBe(true);
+    await expect.poll(() => page.evaluate(() => [".page-tabs-root", ".page-tab-content", ".paper-stage"].every((selector) => {
+      const element = document.querySelector(selector);
+      return element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth;
+    }))).toBe(true);
 
     const fitBox = await sheet.boundingBox();
     await page.getByRole("button", { name: "Zoom in" }).click();
@@ -315,17 +360,32 @@ test("real workflow: fit the whole sheet in the remaining viewport and zoom with
   }
 });
 
-test("real workflow: show OCR text size on preview images but keep labels out of print", async ({ page }) => {
+test("real workflow: show the average OCR text size once above the sheet", async ({ page }) => {
   await openStudio(page);
   const square = await makePng(page, 900, 900);
-  await page.getByLabel("Choose images").setInputFiles({ name: "overlay-size.png", mimeType: "image/png", buffer: square });
-  await expect(page.getByRole("button", { name: "Select overlay-size.png" })).toBeVisible();
-  await saveOcrRatios(page, { "overlay-size.png": 0.05 });
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "average-size-one.png", mimeType: "image/png", buffer: square },
+    { name: "average-size-two.png", mimeType: "image/png", buffer: square },
+  ]);
+  await expect(page.getByRole("button", { name: "Select average-size-one.png" })).toBeVisible();
+  await saveOcrRatios(page, { "average-size-one.png": 0.05, "average-size-two.png": 0.1 });
   await page.reload();
 
-  const previewLabel = page.locator(".paper-sheet:not(.print-sheet) .sheet-ocr-size");
-  await expect(previewLabel).toContainText("mm");
-  await expect(page.locator(".print-sheet .sheet-ocr-size")).toHaveCount(0);
+  const autoMatch = page.getByRole("checkbox", { name: "Automatically match image text sizes" });
+  await expect(autoMatch).toBeChecked();
+  const firstSize = page.locator(".image-item-row").filter({ hasText: "average-size-one.png" }).locator(".image-text-size");
+  const secondSize = page.locator(".image-item-row").filter({ hasText: "average-size-two.png" }).locator(".image-text-size");
+  await expect.poll(async () => Math.abs(await readPrintedTextMm(firstSize) - await readPrintedTextMm(secondSize))).toBeLessThan(0.11);
+
+  await expect(page.locator(".preview-average")).toContainText("Average printed text ≈");
+  await expect(page.locator(".preview-average")).toContainText("mm");
+  await expect(page.locator(".preview-average")).toHaveCount(1);
+  await expect(page.locator(".paper-sheet .sheet-ocr-size")).toHaveCount(0);
+
+  await autoMatch.uncheck();
+  await expect.poll(async () => Math.abs(await readPrintedTextMm(firstSize) - await readPrintedTextMm(secondSize))).toBeGreaterThan(0.2);
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Automatically match image text sizes" })).not.toBeChecked();
 });
 
 test("real workflow: persist auto OCR on paste and leave file uploads unscanned", async ({ page }) => {
@@ -446,18 +506,31 @@ test("real workflow: preview the original image in a full-resolution popover", a
     return canvas.toDataURL("image/png");
   });
   const image = Buffer.from(dataUrl.split(",")[1], "base64");
-  await page.getByLabel("Choose images").setInputFiles({
-    name: "original-size.png",
-    mimeType: "image/png",
-    buffer: image,
-  });
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "original-size.png", mimeType: "image/png", buffer: image },
+    { name: "second-image.png", mimeType: "image/png", buffer: image },
+    { name: "third-image.png", mimeType: "image/png", buffer: image },
+  ]);
 
   await page.getByRole("button", { name: "Preview full image original-size.png" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "original-size.png" })).toBeVisible();
+  await expect(dialog.locator(".image-preview-count")).toHaveText("1 of 3 images");
   const fullImage = dialog.getByRole("img", { name: "original-size.png" });
   await expect(fullImage).toBeVisible();
   await expect.poll(() => fullImage.evaluate((element) => [element.naturalWidth, element.naturalHeight])).toEqual([640, 480]);
+
+  await dialog.getByRole("button", { name: "Next image" }).click();
+  await expect(dialog.getByRole("heading", { name: "second-image.png" })).toBeVisible();
+  await expect(dialog.locator(".image-preview-count")).toHaveText("2 of 3 images");
+  await page.keyboard.press("ArrowRight");
+  await expect(dialog.getByRole("heading", { name: "third-image.png" })).toBeVisible();
+  await page.keyboard.press("ArrowRight");
+  await expect(dialog.getByRole("heading", { name: "original-size.png" })).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(dialog.getByRole("heading", { name: "third-image.png" })).toBeVisible();
+  await dialog.getByRole("button", { name: "Previous image" }).click();
+  await expect(dialog.getByRole("heading", { name: "second-image.png" })).toBeVisible();
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();

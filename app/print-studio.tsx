@@ -4,6 +4,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, DragEvent, ClipboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   FileText,
   ImagePlus,
   Layers2,
@@ -25,8 +27,9 @@ import { readImageDimensions } from "@/lib/image-dimensions";
 import { createId } from "@/lib/ids";
 import { createImageGroup, MAX_IMAGE_GROUPS } from "@/lib/image-groups";
 import { choosePageLayout } from "@/lib/page-orientation";
-import { estimatePrintedTextHeightMm, estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
+import { estimateAveragePrintedTextHeightMm, estimatePrintedTextHeightMm, estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
 import { renderLatexToString } from "@/lib/latex-rendering";
+import { renderMarkdownToString, splitTextBlocks } from "@/lib/markdown-rendering";
 import { fitPageIntoFrame } from "@/lib/preview-fit";
 import { createPageArchive, readPageArchive } from "@/lib/page-archive";
 import { getPageSize, getPrintPageName, PAPER_FORMATS } from "@/lib/paper-formats";
@@ -42,6 +45,7 @@ const EMPTY_WORKSPACE: Workspace = {
   gapMm: 2,
   pageCount: 1,
   autoOcrOnPaste: false,
+  autoMatchTextSize: true,
   groups: [],
   images: [],
   texts: [],
@@ -157,8 +161,13 @@ function PageImage({ image, src }: { image: StoredImage; src?: string }) {
 }
 
 function TextBlockContent({ text }: { text: StoredText }) {
-  if (text.format !== "latex") return text.content;
-  return <span className="math-content" dangerouslySetInnerHTML={{ __html: renderLatexToString(text.content) }} />;
+  if (text.format === "latex") {
+    return <span className="math-content" dangerouslySetInnerHTML={{ __html: renderLatexToString(text.content) }} />;
+  }
+  if (text.format === "markdown") {
+    return <span className="markdown-content" dangerouslySetInnerHTML={{ __html: renderMarkdownToString(text.content) }} />;
+  }
+  return text.content;
 }
 
 function PageSheet({
@@ -233,19 +242,7 @@ function PageSheet({
             "--image-border-color": group?.color ?? "#53656a",
           } as CSSProperties;
           const className = `sheet-image${selected ? " is-selected" : ""}`;
-          const ocrSizeLabel = !print && Number(image.textHeightRatio) > 0
-            ? printedTextSizeLabel(image, placement, workspace.borderMm)
-            : null;
-          const imageContent = (
-            <>
-              <PageImage image={image} src={imageUrls.get(image.id)} />
-              {ocrSizeLabel ? (
-                <span className="sheet-ocr-size" aria-label={`Current detected OCR text size: ${ocrSizeLabel}`}>
-                  {ocrSizeLabel}
-                </span>
-              ) : null}
-            </>
-          );
+          const imageContent = <PageImage image={image} src={imageUrls.get(image.id)} />;
           return onSelect ? (
             <button
               type="button"
@@ -269,7 +266,7 @@ function PageSheet({
         const typeSize = `${(text.fontSize * 100) / metrics.width}cqw`;
         const padding = `${(TEXT_PADDING_PT * 100) / metrics.width}cqw`;
         const textStyle = { ...position, fontSize: typeSize, padding } as CSSProperties;
-        const className = `sheet-text${text.format === "latex" ? " sheet-text-latex" : ""}${selected ? " is-selected" : ""}`;
+        const className = `sheet-text${text.format === "latex" ? " sheet-text-latex" : ""}${text.format === "markdown" ? " sheet-text-markdown" : ""}${selected ? " is-selected" : ""}`;
         return onSelect ? (
           <button
             type="button"
@@ -315,7 +312,8 @@ export default function PrintStudio() {
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
   const [draftFontSize, setDraftFontSize] = useState(16);
-  const [draftTextFormat, setDraftTextFormat] = useState<"plain" | "latex">("plain");
+  const [draftTextFormat, setDraftTextFormat] = useState<"plain" | "latex" | "markdown">("plain");
+  const [splitTextOnBlankLines, setSplitTextOnBlankLines] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
@@ -394,7 +392,9 @@ export default function PrintStudio() {
     return () => observer.disconnect();
   }, [ready]);
 
-  const imageScaleFactors = useMemo(() => getTextMatchScaleFactors(workspace.images), [workspace.images]);
+  const imageScaleFactors = useMemo(() => workspace.autoMatchTextSize
+    ? getTextMatchScaleFactors(workspace.images)
+    : new Map(workspace.images.map((image) => [image.id, 1])), [workspace.autoMatchTextSize, workspace.images]);
   const activeMetrics = useMemo(
     () => calculatePage(workspace, activePage, imageScaleFactors),
     [workspace, activePage, imageScaleFactors],
@@ -403,6 +403,25 @@ export default function PrintStudio() {
   const activeTexts = workspace.texts.filter((text) => text.page === activePage);
   const selectedText = workspace.texts.find((text) => text.id === selectedItemId) ?? null;
   const previewImage = workspace.images.find((image) => image.id === previewImageId) ?? null;
+  const movePreviewImage = useCallback((direction: -1 | 1) => {
+    if (workspace.images.length < 2) return;
+    const currentIndex = workspace.images.findIndex((image) => image.id === previewImageId);
+    const nextIndex = (Math.max(0, currentIndex) + direction + workspace.images.length) % workspace.images.length;
+    setPreviewImageId(workspace.images[nextIndex].id);
+  }, [previewImageId, workspace.images]);
+
+  useEffect(() => {
+    if (!previewImage) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      event.preventDefault();
+      movePreviewImage(event.key === "ArrowLeft" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [movePreviewImage, previewImage]);
 
   const updatePageCount = useCallback((rawValue: number) => {
     const count = clampPageCount(rawValue);
@@ -668,12 +687,15 @@ export default function PrintStudio() {
           : text),
       }));
     } else {
-      const text: StoredText = { id: createId(), page: targetPage, content, fontSize, format: draftTextFormat };
-      setWorkspace((current) => ({ ...current, texts: [...current.texts, text] }));
+      const contents = splitTextOnBlankLines ? splitTextBlocks(content) : [content];
+      const texts: StoredText[] = contents.map((block) => ({
+        id: createId(), page: targetPage, content: block, fontSize, format: draftTextFormat,
+      }));
+      setWorkspace((current) => ({ ...current, texts: [...current.texts, ...texts] }));
       setActivePage(targetPage);
-      setSelectedItemId(text.id);
+      setSelectedItemId(texts[0]?.id ?? null);
     }
-  }, [draftFontSize, draftText, draftTextFormat, selectedText, targetPage]);
+  }, [draftFontSize, draftText, draftTextFormat, selectedText, splitTextOnBlankLines, targetPage]);
 
   const startNewText = useCallback(() => {
     setSelectedItemId(null);
@@ -698,14 +720,20 @@ export default function PrintStudio() {
   const previewSize = fitPageIntoFrame(
     activeMetrics.width,
     activeMetrics.height,
-    Math.max(1, previewStageSize.width - 32),
-    Math.max(1, previewStageSize.height - 32),
+    Math.max(1, previewStageSize.width - 12),
+    Math.max(1, previewStageSize.height - 12),
     previewZoom,
   );
 
   const changePreviewZoom = (factor: number) => {
     setPreviewZoom((current) => Math.min(3, Math.max(0.5, Number((current * factor).toFixed(2)))));
   };
+
+  const averageTextHeightMm = estimateAveragePrintedTextHeightMm(
+    activeImages,
+    activeMetrics.layout.placements,
+    workspace.borderMm,
+  );
 
   const fitPreview = () => {
     setPreviewZoom(1);
@@ -935,6 +963,15 @@ export default function PrintStudio() {
                   aria-label="Import page ZIP"
                 />
               </div>
+              <label className="auto-match-toggle">
+                <input
+                  type="checkbox"
+                  checked={workspace.autoMatchTextSize}
+                  onChange={(event) => setWorkspace((current) => ({ ...current, autoMatchTextSize: event.target.checked }))}
+                  aria-label="Automatically match image text sizes"
+                />
+                <span>Automatically match detected text sizes</span>
+              </label>
             </div>
             <div className="image-groups-control">
               <div className="image-groups-heading">
@@ -1010,16 +1047,17 @@ export default function PrintStudio() {
               className="text-entry"
               value={draftText}
               onChange={(event) => setDraftText(event.target.value)}
-              placeholder={draftTextFormat === "latex" ? "Enter LaTeX, for example \\frac{a}{b}…" : "Write a caption or note…"}
+              placeholder={draftTextFormat === "latex" ? "Enter LaTeX, for example \\frac{a}{b}…" : draftTextFormat === "markdown" ? "Paste a Markdown answer or table…" : "Write a caption or note…"}
               aria-label="Text block content"
             />
             <div className="text-controls">
               <label htmlFor="text-format">Format</label>
-              <Select value={draftTextFormat} onValueChange={(value) => setDraftTextFormat(value === "latex" ? "latex" : "plain")}>
+              <Select value={draftTextFormat} onValueChange={(value) => setDraftTextFormat(value === "latex" || value === "markdown" ? value : "plain")}>
                 <SelectTrigger id="text-format" className="text-format-select" aria-label="Text format"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="plain">Plain text</SelectItem>
                   <SelectItem value="latex">LaTeX math</SelectItem>
+                  <SelectItem value="markdown">Markdown / ChatGPT answer</SelectItem>
                 </SelectContent>
               </Select>
               <label htmlFor="text-size">Type size</label>
@@ -1035,12 +1073,21 @@ export default function PrintStudio() {
                 />
                 <span>pt</span>
               </div>
-              <Button className="text-save-button" onClick={saveText}>
+          <Button className="text-save-button" onClick={saveText} disabled={!draftText.trim()}>
                 <Plus size={15} aria-hidden="true" />
                 {selectedText ? "Save text" : "Add text block"}
               </Button>
             </div>
-            <p className="storage-note">Each text block stays together when arranged. LaTeX accepts MathJax delimiters such as $$…$$.</p>
+            <label className="split-text-toggle">
+              <input
+                type="checkbox"
+                checked={splitTextOnBlankLines}
+                onChange={(event) => setSplitTextOnBlankLines(event.target.checked)}
+                aria-label="Split text at blank lines"
+              />
+              <span>Arrange blank-line sections separately for better space use</span>
+            </label>
+            <p className="storage-note">Markdown supports tables, bold text and inline math. LaTeX accepts MathJax delimiters such as $$…$$.</p>
           </section>
 
           <section className="inspector-section contents-section">
@@ -1119,7 +1166,7 @@ export default function PrintStudio() {
                       setTargetPage(text.page);
                       setDraftText(text.content);
                       setDraftFontSize(text.fontSize);
-                      setDraftTextFormat(text.format === "latex" ? "latex" : "plain");
+                      setDraftTextFormat(text.format === "latex" || text.format === "markdown" ? text.format : "plain");
                     }} aria-label={`Edit text block: ${text.content.slice(0, 40)}`}>
                       <span className="item-text-icon"><FileText size={17} /></span>
                       <span className="item-name">{text.content || "Text block"}</span>
@@ -1148,7 +1195,10 @@ export default function PrintStudio() {
               <h1>Arrange your pages</h1>
             </div>
             <div className="preview-actions">
-              <div className="preview-spec">{currentPaper.label} · {workspace.orientation === "auto" ? `Auto · ${activeMetrics.orientation}` : workspace.orientation[0].toUpperCase() + workspace.orientation.slice(1)} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+              <div className="preview-summary">
+                <div className="preview-spec">{currentPaper.label} · {workspace.orientation === "auto" ? `Auto · ${activeMetrics.orientation}` : workspace.orientation[0].toUpperCase() + workspace.orientation.slice(1)} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+                <div className="preview-average" role="status">Average printed text {averageTextHeightMm === null ? "—" : `≈ ${averageTextHeightMm.toFixed(1)} mm`}</div>
+              </div>
               <div className="zoom-controls" aria-label="Page zoom controls">
                 <Button variant="outline" size="icon-sm" aria-label="Zoom out" onClick={() => changePreviewZoom(1 / 1.25)} disabled={previewZoom <= 0.5}>
                   <Minus size={15} aria-hidden="true" />
@@ -1229,6 +1279,16 @@ export default function PrintStudio() {
               <DialogTitle>{previewImage.name}</DialogTitle>
               <DialogDescription>{previewImage.width} × {previewImage.height} px · original image</DialogDescription>
             </DialogHeader>
+            <div className="image-preview-navigation">
+              <Button variant="outline" size="sm" aria-label="Previous image" onClick={() => movePreviewImage(-1)} disabled={workspace.images.length < 2}>
+                <ChevronLeft size={16} aria-hidden="true" /> Previous
+              </Button>
+              <span className="image-preview-count">{workspace.images.findIndex((image) => image.id === previewImage.id) + 1} of {workspace.images.length} images</span>
+              <Button variant="outline" size="sm" aria-label="Next image" onClick={() => movePreviewImage(1)} disabled={workspace.images.length < 2}>
+                Next <ChevronRight size={16} aria-hidden="true" />
+              </Button>
+            </div>
+            <p className="image-preview-key-hint">Use ← and → to browse images</p>
             <div className="full-image-preview">
               <img src={imageUrls.get(previewImage.id)} alt={previewImage.name} />
             </div>
