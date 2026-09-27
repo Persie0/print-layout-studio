@@ -480,6 +480,7 @@ test("real workflow: persist auto OCR on paste and leave file uploads unscanned"
   await expect(page.getByRole("status", { name: "OCR status for paste-ocr.png" }))
     .toHaveAttribute("data-result", "Text found", { timeout: 120_000 });
   await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
+  await expect.poll(async () => (await readStoredWorkspace(page))?.images?.find((image) => image.name === "paste-ocr.png")?.ocrScanned).toBe(true);
 
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();
