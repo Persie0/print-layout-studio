@@ -309,8 +309,9 @@ test("real workflow: render ChatGPT Markdown tables and arrange blank-line secti
   await expect(tableBlock.locator("strong")).toHaveText("P and Q");
   await expect(tableBlock.locator(".katex")).toHaveCount(2);
   await expect(tableBlock).toContainText("scope matters");
-  await expect(sheetBlocks.nth(2)).toContainText("Raw HTML stays text");
-  await expect(sheetBlocks.nth(2).locator("img")).toHaveCount(0);
+  const escapedHtmlBlock = sheetBlocks.filter({ hasText: "Raw HTML stays text" });
+  await expect(escapedHtmlBlock).toHaveCount(1);
+  await expect(escapedHtmlBlock.locator("img")).toHaveCount(0);
 
   await page.reload();
   await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-text-markdown table")).toBeVisible();
@@ -384,6 +385,7 @@ test("real workflow: show the average OCR text size once above the sheet", async
 
   await autoMatch.uncheck();
   await expect.poll(async () => Math.abs(await readPrintedTextMm(firstSize) - await readPrintedTextMm(secondSize))).toBeGreaterThan(0.2);
+  await expect.poll(async () => (await readStoredWorkspace(page))?.autoMatchTextSize).toBe(false);
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Automatically match image text sizes" })).not.toBeChecked();
 });

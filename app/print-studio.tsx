@@ -720,8 +720,8 @@ export default function PrintStudio() {
   const previewSize = fitPageIntoFrame(
     activeMetrics.width,
     activeMetrics.height,
-    Math.max(1, previewStageSize.width - 12),
-    Math.max(1, previewStageSize.height - 12),
+    Math.max(1, previewStageSize.width - 4),
+    Math.max(1, previewStageSize.height - 4),
     previewZoom,
   );
 
