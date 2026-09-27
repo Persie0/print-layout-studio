@@ -23,8 +23,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { readImageDimensions } from "@/lib/image-dimensions";
 import { createId } from "@/lib/ids";
-import { layoutPage } from "@/lib/layout";
-import { estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
+import { createImageGroup, MAX_IMAGE_GROUPS } from "@/lib/image-groups";
+import { choosePageLayout } from "@/lib/page-orientation";
+import { estimatePrintedTextHeightMm, estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
+import { renderLatexToString } from "@/lib/latex-rendering";
 import { createPageArchive, readPageArchive } from "@/lib/page-archive";
 import { getPageSize, getPrintPageName, PAPER_FORMATS } from "@/lib/paper-formats";
 import { loadWorkspace, removeStoredImage, saveWorkspace } from "@/lib/storage";
@@ -33,11 +35,11 @@ import type { PaperFormat } from "@/lib/paper-formats";
 
 const EMPTY_WORKSPACE: Workspace = {
   paper: "a4",
-  orientation: "portrait",
   marginMm: 4,
   borderMm: 1,
   gapMm: 2,
   pageCount: 1,
+  groups: [],
   images: [],
   texts: [],
 };
@@ -48,12 +50,13 @@ const TEXT_WIDTH_PT = 240;
 const TEXT_PADDING_PT = 8;
 
 type PageMetrics = {
+  orientation: "portrait" | "landscape";
   width: number;
   height: number;
   margin: number;
   innerWidth: number;
   innerHeight: number;
-  layout: ReturnType<typeof layoutPage>;
+  layout: ReturnType<typeof choosePageLayout>["layout"];
 };
 
 type PageItem = (StoredImage & { type: "image"; scaleFactor?: number }) | (StoredText & { type: "text"; width: number; height: number });
@@ -86,29 +89,45 @@ function estimateTextHeight(text: string, fontSize: number, width: number) {
   return Math.max(fontSize * 1.4, lineCount * fontSize * 1.45) + TEXT_PADDING_PT * 2;
 }
 
+function estimateMathBlockHeight(text: string, fontSize: number) {
+  const rows = Math.max(1, text.split(/\\\\|\n/).length);
+  return Math.max(fontSize * 1.7, rows * fontSize * 1.7) + TEXT_PADDING_PT * 2;
+}
+
+function printedTextSizeLabel(image: StoredImage, placement: PageMetrics["layout"]["placements"][number] | undefined, borderMm: number) {
+  if (!(Number(image.textHeightRatio) > 0)) {
+    return image.ocrScanned ? "No text found" : "Text size not scanned";
+  }
+  const heightMm = estimatePrintedTextHeightMm(image, placement, borderMm);
+  if (heightMm === null) return "Text size unavailable";
+  return `Printed text ≈ ${heightMm < 0.05 ? "<0.1" : heightMm.toFixed(1)} mm`;
+}
+
 function calculatePage(workspace: Workspace, pageNumber: number, imageScaleFactors: Map<string, number>): PageMetrics {
-  const { width, height } = getPageSize(workspace.paper, workspace.orientation);
   const margin = Math.max(0, workspace.marginMm) * PT_PER_MM;
-  const innerWidth = Math.max(1, width - margin * 2);
-  const innerHeight = Math.max(1, height - margin * 2);
+  const portraitSize = getPageSize(workspace.paper, "portrait");
+  const landscapeSize = getPageSize(workspace.paper, "landscape");
   const images: PageItem[] = workspace.images
     .filter((image) => image.page === pageNumber)
     .map((image) => ({ ...image, type: "image", scaleFactor: imageScaleFactors.get(image.id) ?? 1 }));
   const texts: PageItem[] = workspace.texts
     .filter((text) => text.page === pageNumber)
     .map((text) => {
-      const textWidth = Math.min(TEXT_WIDTH_PT, innerWidth);
+      const textWidth = Math.min(TEXT_WIDTH_PT, Math.max(1, portraitSize.width - margin * 2));
       return {
         ...text,
         type: "text",
         width: textWidth,
-        height: estimateTextHeight(text.content, text.fontSize, textWidth),
+        height: text.format === "latex"
+          ? estimateMathBlockHeight(text.content, text.fontSize)
+          : estimateTextHeight(text.content, text.fontSize, textWidth),
       };
     });
   const items = [...images, ...texts];
-  const layout = layoutPage({
-    width: innerWidth,
-    height: innerHeight,
+  const choice = choosePageLayout({
+    portraitSize,
+    landscapeSize,
+    margin,
     gap: Math.max(0, workspace.gapMm) * PT_PER_MM,
     imageBorder: Math.max(0, workspace.borderMm) * PT_PER_MM,
     items: items.map((item) => ({
@@ -116,10 +135,13 @@ function calculatePage(workspace: Workspace, pageNumber: number, imageScaleFacto
       type: item.type,
       width: item.width,
       height: item.height,
-      ...(item.type === "image" ? { scaleFactor: item.scaleFactor } : {}),
+      ...(item.type === "image" ? {
+        scaleFactor: item.scaleFactor,
+        textHeightRatio: item.textHeightRatio,
+      } : {}),
     })),
   });
-  return { width, height, margin, innerWidth, innerHeight, layout };
+  return { ...choice, margin };
 }
 
 function clampPageCount(value: number) {
@@ -128,6 +150,11 @@ function clampPageCount(value: number) {
 
 function PageImage({ image, src }: { image: StoredImage; src?: string }) {
   return src ? <img src={src} alt={image.name} draggable={false} /> : null;
+}
+
+function TextBlockContent({ text }: { text: StoredText }) {
+  if (text.format !== "latex") return text.content;
+  return <span className="math-content" dangerouslySetInnerHTML={{ __html: renderLatexToString(text.content) }} />;
 }
 
 function PageSheet({
@@ -149,9 +176,14 @@ function PageSheet({
 }) {
   const images = new Map(workspace.images.map((image) => [image.id, image]));
   const texts = new Map(workspace.texts.map((text) => [text.id, text]));
+  const groups = new Map(workspace.groups.map((group) => [group.id, group]));
   const sheetStyle = {
     aspectRatio: `${metrics.width} / ${metrics.height}`,
-    ...(print ? { width: `${metrics.width}pt`, height: `${metrics.height}pt` } : {}),
+    ...(print ? {
+      width: `${metrics.width}pt`,
+      height: `${metrics.height}pt`,
+      page: metrics.orientation === "landscape" ? "sheetLandscape" : "sheetPortrait",
+    } : {}),
     "--paper-width-pt": metrics.width,
   } as CSSProperties;
 
@@ -160,6 +192,7 @@ function PageSheet({
       className={`paper-sheet${print ? " print-sheet" : ""}`}
       style={sheetStyle}
       data-page-number={pageNumber}
+      data-orientation={metrics.orientation}
       aria-label={`Page ${pageNumber}`}
     >
       {!metrics.layout.fits ? (
@@ -185,12 +218,17 @@ function PageSheet({
         if (placement.type === "image") {
           const image = images.get(placement.id);
           if (!image) return null;
+          const group = image.groupId ? groups.get(image.groupId) : undefined;
+          const imageStyle = {
+            ...position,
+            "--image-border-color": group?.color ?? "#53656a",
+          } as CSSProperties;
           const className = `sheet-image${selected ? " is-selected" : ""}`;
           return onSelect ? (
             <button
               type="button"
               className={className}
-              style={position}
+              style={imageStyle}
               key={placement.id}
               onClick={() => onSelect(placement.id)}
               aria-label={`Select image ${image.name}`}
@@ -198,7 +236,7 @@ function PageSheet({
               <PageImage image={image} src={imageUrls.get(image.id)} />
             </button>
           ) : (
-            <div className="sheet-image" style={position} key={placement.id}>
+            <div className="sheet-image" style={imageStyle} key={placement.id}>
               <PageImage image={image} src={imageUrls.get(image.id)} />
             </div>
           );
@@ -209,7 +247,7 @@ function PageSheet({
         const typeSize = `${(text.fontSize * 100) / metrics.width}cqw`;
         const padding = `${(TEXT_PADDING_PT * 100) / metrics.width}cqw`;
         const textStyle = { ...position, fontSize: typeSize, padding } as CSSProperties;
-        const className = `sheet-text${selected ? " is-selected" : ""}`;
+        const className = `sheet-text${text.format === "latex" ? " sheet-text-latex" : ""}${selected ? " is-selected" : ""}`;
         return onSelect ? (
           <button
             type="button"
@@ -219,11 +257,11 @@ function PageSheet({
             onClick={() => onSelect(placement.id)}
             aria-label={`Select text block: ${text.content.slice(0, 60)}`}
           >
-            {text.content}
+            <TextBlockContent text={text} />
           </button>
         ) : (
-          <div className="sheet-text" style={textStyle} key={placement.id}>
-            {text.content}
+          <div className={className} style={textStyle} key={placement.id}>
+            <TextBlockContent text={text} />
           </div>
         );
       })}
@@ -255,6 +293,7 @@ export default function PrintStudio() {
   const [previewImageId, setPreviewImageId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
   const [draftFontSize, setDraftFontSize] = useState(16);
+  const [draftTextFormat, setDraftTextFormat] = useState<"plain" | "latex">("plain");
   const [dragging, setDragging] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
@@ -508,6 +547,32 @@ export default function PrintStudio() {
     if (selectedItemId === id && page !== activePage) setSelectedItemId(null);
   }, [activePage, selectedItemId]);
 
+  const addImageGroup = useCallback(() => {
+    setWorkspace((current) => {
+      const group = createImageGroup(current.groups, createId());
+      return group ? { ...current, groups: [...current.groups, group] } : current;
+    });
+  }, []);
+
+  const deleteImageGroup = useCallback((groupId: string) => {
+    setWorkspace((current) => ({
+      ...current,
+      groups: current.groups.filter((group) => group.id !== groupId),
+      images: current.images.map((image) => image.groupId === groupId
+        ? { ...image, groupId: undefined }
+        : image),
+    }));
+  }, []);
+
+  const assignImageGroup = useCallback((imageId: string, groupId: string) => {
+    setWorkspace((current) => ({
+      ...current,
+      images: current.images.map((image) => image.id === imageId
+        ? { ...image, groupId: groupId === "none" ? undefined : groupId }
+        : image),
+    }));
+  }, []);
+
   const deleteItem = useCallback((id: string) => {
     const urls = new Map(imageUrlsRef.current);
     const removedUrl = urls.get(id);
@@ -536,21 +601,22 @@ export default function PrintStudio() {
       setWorkspace((current) => ({
         ...current,
         texts: current.texts.map((text) => text.id === selectedText.id
-          ? { ...text, content, fontSize }
+          ? { ...text, content, fontSize, format: draftTextFormat }
           : text),
       }));
     } else {
-      const text: StoredText = { id: createId(), page: targetPage, content, fontSize };
+      const text: StoredText = { id: createId(), page: targetPage, content, fontSize, format: draftTextFormat };
       setWorkspace((current) => ({ ...current, texts: [...current.texts, text] }));
       setActivePage(targetPage);
       setSelectedItemId(text.id);
     }
-  }, [draftFontSize, draftText, selectedText, targetPage]);
+  }, [draftFontSize, draftText, draftTextFormat, selectedText, targetPage]);
 
   const startNewText = useCallback(() => {
     setSelectedItemId(null);
     setDraftText("");
     setDraftFontSize(16);
+    setDraftTextFormat("plain");
   }, []);
 
   const onImageItemClick = useCallback((image: StoredImage) => {
@@ -569,7 +635,10 @@ export default function PrintStudio() {
 
   return (
     <div className="app-shell" onPaste={onPaste}>
-      <style>{`@media print { @page { size: ${getPrintPageName(workspace.paper)} ${workspace.orientation}; margin: 0; } }`}</style>
+      <style>{`@media print {
+        @page sheetPortrait { size: ${getPrintPageName(workspace.paper)} portrait; margin: 0; }
+        @page sheetLandscape { size: ${getPrintPageName(workspace.paper)} landscape; margin: 0; }
+      }`}</style>
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark"><Layers2 size={20} strokeWidth={2.5} /></span>
@@ -610,18 +679,7 @@ export default function PrintStudio() {
         </div>
         <div className="toolbar-field orientation-field">
           <label>Orientation</label>
-          <Button
-            variant="outline"
-            className="orientation-button"
-            onClick={() => setWorkspace((current) => ({
-              ...current,
-              orientation: current.orientation === "portrait" ? "landscape" : "portrait",
-            }))}
-            aria-label={`Switch to ${workspace.orientation === "portrait" ? "landscape" : "portrait"}`}
-          >
-            <RotateCw size={15} aria-hidden="true" />
-            {workspace.orientation === "portrait" ? "Portrait" : "Landscape"}
-          </Button>
+          <span className="orientation-value">Auto per page</span>
         </div>
         <div className="toolbar-field page-count-field">
           <label htmlFor="page-count">Pages</label>
@@ -758,6 +816,47 @@ export default function PrintStudio() {
                 />
               </div>
             </div>
+            <div className="image-groups-control">
+              <div className="image-groups-heading">
+                <span>Image groups</span>
+                <span className="image-group-count">{workspace.groups.length}/{MAX_IMAGE_GROUPS}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="new-image-group"
+                  onClick={addImageGroup}
+                  disabled={workspace.groups.length >= MAX_IMAGE_GROUPS}
+                  aria-label="New image group"
+                >
+                  <Plus size={14} aria-hidden="true" />
+                  New group
+                </Button>
+              </div>
+              {workspace.groups.length > 0 ? (
+                <>
+                  <div className="image-group-list">
+                    {workspace.groups.map((group) => (
+                      <div className="image-group-chip" key={group.id}>
+                        <span className="image-group-color" style={{ backgroundColor: group.color }} aria-hidden="true" />
+                        <span>{group.name}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Delete ${group.name}`}
+                          title={`Delete ${group.name}`}
+                          onClick={() => deleteImageGroup(group.id)}
+                        >
+                          <Trash2 size={13} aria-hidden="true" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="image-groups-note">Images in a group share its border color.</p>
+                </>
+              ) : (
+                <p className="image-groups-note">Create a group to mark its images with one border color.</p>
+              )}
+            </div>
             <div className="target-page-control">
               <label htmlFor="image-target">Place new items on</label>
               <Select value={String(targetPage)} onValueChange={(value) => setTargetPage(Number(value))}>
@@ -782,10 +881,18 @@ export default function PrintStudio() {
               className="text-entry"
               value={draftText}
               onChange={(event) => setDraftText(event.target.value)}
-              placeholder="Write a caption or note…"
+              placeholder={draftTextFormat === "latex" ? "Enter LaTeX, for example \\frac{a}{b}…" : "Write a caption or note…"}
               aria-label="Text block content"
             />
             <div className="text-controls">
+              <label htmlFor="text-format">Format</label>
+              <Select value={draftTextFormat} onValueChange={(value) => setDraftTextFormat(value === "latex" ? "latex" : "plain")}>
+                <SelectTrigger id="text-format" className="text-format-select" aria-label="Text format"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="plain">Plain text</SelectItem>
+                  <SelectItem value="latex">LaTeX math</SelectItem>
+                </SelectContent>
+              </Select>
               <label htmlFor="text-size">Type size</label>
               <div className="margin-input-wrap">
                 <Input
@@ -804,7 +911,7 @@ export default function PrintStudio() {
                 {selectedText ? "Save text" : "Add text block"}
               </Button>
             </div>
-            <p className="storage-note">Each text block stays together when the page is arranged.</p>
+            <p className="storage-note">Each text block stays together when arranged. LaTeX accepts MathJax delimiters such as $$…$$.</p>
           </section>
 
           <section className="inspector-section contents-section">
@@ -831,19 +938,48 @@ export default function PrintStudio() {
                 {activeImages.map((image) => (
                   <div className={`item-row image-item-row${selectedItemId === image.id ? " item-selected" : ""}`} key={image.id}>
                     <button className="item-thumb-preview" type="button" onClick={() => setPreviewImageId(image.id)} aria-label={`Preview full image ${image.name}`} title="View full image">
-                      <span className="item-thumb"><PageImage image={image} src={imageUrls.get(image.id)} /></span>
+                    <span
+                      className="item-thumb"
+                      style={{ borderColor: workspace.groups.find((group) => group.id === image.groupId)?.color }}
+                    >
+                      <PageImage image={image} src={imageUrls.get(image.id)} />
+                    </span>
                     </button>
                     <button className="item-main" type="button" onClick={() => onImageItemClick(image)} aria-label={`Select ${image.name}`}>
-                      <span className="item-name">{image.name}</span>
+                      <span className="item-label-stack">
+                        <span className="item-name">{image.name}</span>
+                        <span className="image-text-size" title="Estimated median OCR text height at this image's current print size">
+                          {printedTextSizeLabel(
+                            image,
+                            activeMetrics.layout.placements.find((placement) => placement.id === image.id),
+                            workspace.borderMm,
+                          )}
+                        </span>
+                      </span>
                       <span className="ocr-flag" role="status" aria-label={`OCR status for ${image.name}`} data-result={getOcrStatusLabel(image)} title={getOcrStatusLabel(image)}>
                         {getOcrStatusLabel(image) === "Text found" ? "OCR ✓" : getOcrStatusLabel(image) === "No text found" ? "OCR —" : "OCR ?"}
                       </span>
                     </button>
                     <Button variant="ghost" size="icon-xs" className="rescan-ocr" aria-label={`Rescan OCR for ${image.name}`} title="Rescan OCR" disabled={ocrRunning} onClick={() => rescanImageText(image)}><RotateCw size={14} /></Button>
-                    <Select value={String(image.page)} onValueChange={(value) => assignItem(image.id, Number(value))}>
-                      <SelectTrigger className="item-page-select" aria-label={`Page for ${image.name}`}><SelectValue /></SelectTrigger>
-                      <SelectContent>{pageOptions.map((page) => <SelectItem key={page} value={String(page)}>Page {page}</SelectItem>)}</SelectContent>
-                    </Select>
+                    <div className="image-item-assignments">
+                      <Select value={String(image.page)} onValueChange={(value) => assignItem(image.id, Number(value))}>
+                        <SelectTrigger className="item-page-select" aria-label={`Page for ${image.name}`}><SelectValue /></SelectTrigger>
+                        <SelectContent>{pageOptions.map((page) => <SelectItem key={page} value={String(page)}>Page {page}</SelectItem>)}</SelectContent>
+                      </Select>
+                      <Select value={image.groupId ?? "none"} onValueChange={(value) => assignImageGroup(image.id, value)}>
+                        <SelectTrigger
+                          className="item-group-select"
+                          aria-label={`Group for ${image.name}`}
+                          style={{ borderColor: workspace.groups.find((group) => group.id === image.groupId)?.color }}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">No group</SelectItem>
+                          {workspace.groups.map((group) => <SelectItem key={group.id} value={group.id}>{group.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <Button variant="ghost" size="icon-xs" className="delete-item" aria-label={`Remove ${image.name}`} onClick={() => deleteItem(image.id)}><Trash2 size={14} /></Button>
                   </div>
                 ))}
@@ -854,6 +990,7 @@ export default function PrintStudio() {
                       setTargetPage(text.page);
                       setDraftText(text.content);
                       setDraftFontSize(text.fontSize);
+                      setDraftTextFormat(text.format === "latex" ? "latex" : "plain");
                     }} aria-label={`Edit text block: ${text.content.slice(0, 40)}`}>
                       <span className="item-text-icon"><FileText size={17} /></span>
                       <span className="item-name">{text.content || "Text block"}</span>
@@ -881,7 +1018,7 @@ export default function PrintStudio() {
               <p className="eyebrow">PRINT PREVIEW</p>
               <h1>Arrange your pages</h1>
             </div>
-            <div className="preview-spec">{currentPaper.label} · {workspace.orientation} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+            <div className="preview-spec">{currentPaper.label} · Auto {activeMetrics.orientation} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
           </div>
           <Tabs value={String(activePage)} onValueChange={(value) => {
             const page = Number(value);

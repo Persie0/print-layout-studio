@@ -1,5 +1,7 @@
 import { isPaperFormat } from "@/lib/paper-formats";
 import type { PaperFormat } from "@/lib/paper-formats";
+import { normalizeImageGroups } from "@/lib/image-groups";
+import type { ImageGroup } from "@/lib/image-groups";
 
 export type StoredImage = {
   id: string;
@@ -9,6 +11,7 @@ export type StoredImage = {
   height: number;
   textHeightRatio?: number;
   ocrScanned?: boolean;
+  groupId?: string;
   blob: Blob;
 };
 
@@ -17,17 +20,18 @@ export type StoredText = {
   page: number;
   content: string;
   fontSize: number;
+  format?: "plain" | "latex";
 };
 
 export type Workspace = {
   paper: PaperFormat;
-  orientation: "portrait" | "landscape";
   marginMm: number;
   borderMm: number;
   gapMm: number;
   pageCount: number;
   images: StoredImage[];
   texts: StoredText[];
+  groups: ImageGroup[];
 };
 
 const DATABASE_NAME = "print-layout-studio";
@@ -92,23 +96,29 @@ export async function loadWorkspace(): Promise<Workspace | null> {
   const metadata = Array.isArray(record.images) ? record.images as Omit<StoredImage, "blob">[] : [];
   const storedBorderMm = record.borderMm === undefined ? 1 : Number(record.borderMm);
   const storedGapMm = record.gapMm === undefined ? 2 : Number(record.gapMm);
+  const groups = normalizeImageGroups(record.groups);
+  const groupIds = new Set(groups.map((group) => group.id));
   return {
     paper: isPaperFormat(record.paper) ? record.paper : "a4",
-    orientation: record.orientation === "landscape" ? "landscape" : "portrait",
     marginMm: Number(record.marginMm) || 4,
     borderMm: Number.isFinite(storedBorderMm) ? Math.max(0, Math.min(10, storedBorderMm)) : 1,
     gapMm: Number.isFinite(storedGapMm) ? Math.max(0, Math.min(20, storedGapMm)) : 2,
     pageCount: Math.max(1, Math.min(30, Number(record.pageCount) || 1)),
+    groups,
     images: metadata.flatMap((image) => {
       const blob = byId.get(image.id);
       return blob ? [{
         ...image,
         textHeightRatio: Number.isFinite(Number(image.textHeightRatio)) ? Number(image.textHeightRatio) : undefined,
         ocrScanned: image.ocrScanned === true,
+        groupId: typeof image.groupId === "string" && groupIds.has(image.groupId) ? image.groupId : undefined,
         blob,
       }] : [];
     }),
-    texts: Array.isArray(record.texts) ? record.texts as StoredText[] : [],
+    texts: Array.isArray(record.texts) ? (record.texts as StoredText[]).map((text) => ({
+      ...text,
+      format: text.format === "latex" ? "latex" : "plain",
+    })) : [],
   };
 }
 
@@ -120,8 +130,8 @@ export async function saveWorkspace(workspace: Workspace): Promise<void> {
   transaction.objectStore("workspace").put({
     id: WORKSPACE_ID,
     ...settings,
-    images: images.map(({ id, name, page, width, height, textHeightRatio, ocrScanned }) => ({
-      id, name, page, width, height, textHeightRatio, ocrScanned,
+    images: images.map(({ id, name, page, width, height, textHeightRatio, ocrScanned, groupId }) => ({
+      id, name, page, width, height, textHeightRatio, ocrScanned, groupId,
     })),
   });
   for (const image of images) imageStore.put({ id: image.id, blob: image.blob });

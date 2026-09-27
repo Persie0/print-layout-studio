@@ -1,16 +1,16 @@
 import { expect, test } from "@playwright/test";
 import { unzipSync, zipSync } from "fflate";
 
-async function makePng(page) {
-  const dataUrl = await page.evaluate(() => {
+async function makePng(page, width = 32, height = 32) {
+  const dataUrl = await page.evaluate(({ imageWidth, imageHeight }) => {
     const canvas = document.createElement("canvas");
-    canvas.width = 32;
-    canvas.height = 32;
+    canvas.width = imageWidth;
+    canvas.height = imageHeight;
     const context = canvas.getContext("2d");
     context.fillStyle = "#2684ff";
     context.fillRect(0, 0, canvas.width, canvas.height);
     return canvas.toDataURL("image/png");
-  });
+  }, { imageWidth: width, imageHeight: height });
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
@@ -18,6 +18,58 @@ async function openStudio(page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Arrange your pages" })).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
+}
+
+async function saveOcrRatios(page, ratiosByName) {
+  await expect.poll(async () => (await readStoredWorkspace(page))?.images?.length ?? 0)
+    .toBe(Object.keys(ratiosByName).length);
+  await page.evaluate((ratios) => new Promise((resolve, reject) => {
+    const open = indexedDB.open("print-layout-studio", 1);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const database = open.result;
+      const transaction = database.transaction("workspace", "readwrite");
+      const store = transaction.objectStore("workspace");
+      const request = store.get("active");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const workspace = request.result;
+        workspace.images = workspace.images.map((image) => ({
+          ...image,
+          ocrScanned: true,
+          textHeightRatio: ratios[image.name],
+        }));
+        store.put(workspace);
+      };
+      transaction.oncomplete = () => {
+        database.close();
+        resolve();
+      };
+      transaction.onerror = () => reject(transaction.error);
+    };
+  }), ratiosByName);
+}
+
+async function readStoredWorkspace(page) {
+  return page.evaluate(() => new Promise((resolve, reject) => {
+    const open = indexedDB.open("print-layout-studio", 1);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const database = open.result;
+      const request = database.transaction("workspace", "readonly").objectStore("workspace").get("active");
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        database.close();
+        resolve(request.result ?? null);
+      };
+    };
+  }));
+}
+
+async function readPrintedTextMm(locator) {
+  const text = await locator.textContent();
+  const match = text?.match(/([\d.]+) mm/);
+  return match ? Number(match[1]) : null;
 }
 
 test("real workflow: add page items, adjust print settings, and restore them after reload", async ({ page }) => {
@@ -38,7 +90,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await page.getByLabel("Type size").fill("18");
   await page.getByRole("button", { name: "Add text block" }).click();
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
-  await expect(page.getByText(/A5 · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
+  await expect(page.getByText(/A5 · Auto portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Select text block: Keep this complete caption together on page two." })).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
 
@@ -46,8 +98,135 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await expect(page.getByRole("button", { name: "Select red-square.png" })).toBeVisible();
   await expect(page.getByLabel("Gap between images in millimeters")).toHaveValue("6");
   await expect(page.getByLabel("Image border width in millimeters")).toHaveValue("2");
-  await expect(page.getByText(/A5 · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
+  await expect(page.getByText(/A5 · Auto portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
+});
+
+test("real workflow: auto-rotate each sheet for its photos and print both paper orientations", async ({ page }) => {
+  await openStudio(page);
+  await page.getByLabel("Number of pages").fill("2");
+
+  const landscapePhoto = await makePng(page, 1600, 900);
+  await page.getByLabel("Choose images").setInputFiles({
+    name: "wide-photo.png",
+    mimeType: "image/png",
+    buffer: landscapePhoto,
+  });
+
+  await page.getByLabel("Page for new items").click();
+  await page.getByRole("option", { name: "Page 2" }).click();
+  const portraitPhoto = await makePng(page, 900, 1600);
+  await page.getByLabel("Choose images").setInputFiles({
+    name: "tall-photo.png",
+    mimeType: "image/png",
+    buffer: portraitPhoto,
+  });
+
+  await page.getByRole("tab", { name: "Page 1" }).click();
+  await expect(page.getByText(/A4 · Auto landscape ·/)).toBeVisible();
+  const printPageOne = page.locator('.print-sheet[data-page-number="1"]');
+  const printPageTwo = page.locator('.print-sheet[data-page-number="2"]');
+  await expect(printPageOne).toHaveAttribute("data-orientation", "landscape");
+  await expect(printPageTwo).toHaveAttribute("data-orientation", "portrait");
+  await expect.poll(() => printPageOne.locator("img").evaluate((image) => [image.naturalWidth, image.naturalHeight])).toEqual([1600, 900]);
+  await expect.poll(() => printPageTwo.locator("img").evaluate((image) => [image.naturalWidth, image.naturalHeight])).toEqual([900, 1600]);
+
+  const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+  const boxes = [...pdf.toString("latin1").matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
+    .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
+  expect(boxes).toHaveLength(2);
+  expect(boxes[0].width).toBeGreaterThan(boxes[0].height);
+  expect(boxes[1].height).toBeGreaterThan(boxes[1].width);
+});
+
+test("real workflow: group images by border color, persist groups, and enforce the color limit", async ({ page }) => {
+  await openStudio(page);
+  const firstImage = await makePng(page, 640, 480);
+  const secondImage = await makePng(page, 480, 640);
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "first-group-image.png", mimeType: "image/png", buffer: firstImage },
+    { name: "second-group-image.png", mimeType: "image/png", buffer: secondImage },
+  ]);
+
+  await page.getByRole("button", { name: "New image group" }).click();
+  await page.getByLabel("Group for first-group-image.png").click();
+  await page.getByRole("option", { name: "Group 1" }).click();
+  await page.getByRole("button", { name: "New image group" }).click();
+  await page.getByLabel("Group for second-group-image.png").click();
+  await page.getByRole("option", { name: "Group 2" }).click();
+
+  const firstBorder = page.getByRole("button", { name: "Select image first-group-image.png" });
+  const secondBorder = page.getByRole("button", { name: "Select image second-group-image.png" });
+  const firstColor = await firstBorder.evaluate((element) => getComputedStyle(element).borderTopColor);
+  const secondColor = await secondBorder.evaluate((element) => getComputedStyle(element).borderTopColor);
+  expect(firstColor).not.toEqual(secondColor);
+  const printedFirstColor = await page.locator('.print-sheet[data-page-number="1"] img[alt="first-group-image.png"]')
+    .evaluate((image) => getComputedStyle(image.parentElement).borderTopColor);
+  expect(printedFirstColor).toEqual(firstColor);
+
+  await page.waitForTimeout(500);
+  await expect(page.getByText("Saved on this device")).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel("Group for first-group-image.png")).toContainText("Group 1");
+  await expect(page.getByLabel("Group for second-group-image.png")).toContainText("Group 2");
+
+  for (let count = 2; count < 8; count += 1) {
+    await page.getByRole("button", { name: "New image group" }).click();
+  }
+  await expect(page.getByText("8/8")).toBeVisible();
+  await expect(page.getByRole("button", { name: "New image group" })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Delete Group 1" }).click();
+  await expect(page.getByLabel("Group for first-group-image.png")).toContainText("No group");
+  await expect(page.getByText("7/8")).toBeVisible();
+});
+
+test("real workflow: show current printed OCR text size and update it when an image moves pages", async ({ page }) => {
+  await openStudio(page);
+  await page.getByLabel("Number of pages").fill("2");
+  const square = await makePng(page, 900, 900);
+  await page.getByLabel("Choose images").setInputFiles([
+    { name: "size-one.png", mimeType: "image/png", buffer: square },
+    { name: "size-two.png", mimeType: "image/png", buffer: square },
+  ]);
+  await expect(page.getByRole("button", { name: "Select size-one.png" })).toBeVisible();
+  await page.getByText("Saved on this device").waitFor();
+  await saveOcrRatios(page, { "size-one.png": 0.05, "size-two.png": 0.05 });
+
+  await page.reload();
+  const firstImage = page.locator(".image-item-row").filter({ hasText: "size-one.png" });
+  const firstSize = firstImage.locator(".image-text-size");
+  await expect(firstSize).toContainText("Printed text ≈");
+  await expect(firstImage.getByRole("status", { name: "OCR status for size-one.png" })).toHaveText("OCR ✓");
+  const beforeMove = await readPrintedTextMm(firstSize);
+  expect(beforeMove).not.toBeNull();
+
+  await page.getByLabel("Page for size-two.png").click();
+  await page.getByRole("option", { name: "Page 2" }).click();
+  await expect.poll(() => readPrintedTextMm(firstSize)).toBeGreaterThan(beforeMove * 1.2);
+});
+
+test("real workflow: render and persist LaTeX math on the print sheet", async ({ page }) => {
+  await openStudio(page);
+  await page.getByLabel("Text format").click();
+  await page.getByRole("option", { name: "LaTeX math" }).click();
+  await page.getByLabel("Text block content").fill("$$\\frac{1}{2} + \\sqrt{x^2 + 1} = y$$");
+  await page.getByLabel("Type size").fill("24");
+  await page.getByRole("button", { name: "Add text block" }).click();
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.format).toBe("latex");
+
+  const previewMath = page.locator(".paper-sheet:not(.print-sheet) .sheet-text-latex .katex-display");
+  await expect(previewMath).toBeVisible();
+  await expect(page.locator(".print-sheet .sheet-text-latex .katex-display")).toHaveCount(1);
+  await expect(page.locator(".print-sheet .sheet-text-latex annotation[encoding='application/x-tex']"))
+    .toContainText("\\frac{1}{2} + \\sqrt{x^2 + 1} = y");
+
+  await page.reload();
+  await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-text-latex .katex-display")).toBeVisible();
+  await page.getByRole("button", { name: /Edit text block:/ }).click();
+  await expect(page.getByLabel("Text format")).toContainText("LaTeX math");
+  const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+  expect(pdf.length).toBeGreaterThan(1000);
 });
 
 test("real workflow: delete an image and keep it deleted after reload", async ({ page }) => {
