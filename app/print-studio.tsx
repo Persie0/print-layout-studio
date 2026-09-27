@@ -9,6 +9,7 @@ import {
   FileText,
   ImagePlus,
   Layers2,
+  ListOrdered,
   Download,
   Minus,
   Plus,
@@ -192,6 +193,12 @@ function PageSheet({
   const images = new Map(workspace.images.map((image) => [image.id, image]));
   const texts = new Map(workspace.texts.map((text) => [text.id, text]));
   const groups = new Map(workspace.groups.map((group) => [group.id, group]));
+  const groupNumbers = new Map<string, number>();
+  for (const group of workspace.groups.filter((candidate) => candidate.numberImages)) {
+    workspace.images.filter((image) => image.groupId === group.id).forEach((image, index) => {
+      groupNumbers.set(image.id, index + 1);
+    });
+  }
   const sheetStyle = {
     aspectRatio: `${metrics.width} / ${metrics.height}`,
     ...(print ? {
@@ -240,9 +247,14 @@ function PageSheet({
           const imageStyle = {
             ...position,
             "--image-border-color": group?.color ?? "#53656a",
+            "--image-number-color": group?.color ?? "#1769aa",
           } as CSSProperties;
           const className = `sheet-image${selected ? " is-selected" : ""}`;
-          const imageContent = <PageImage image={image} src={imageUrls.get(image.id)} />;
+          const groupNumber = groupNumbers.get(image.id);
+          const imageContent = <>
+            <PageImage image={image} src={imageUrls.get(image.id)} />
+            {groupNumber ? <span className="sheet-image-number" aria-label={`${group?.name ?? "Image group"} image ${groupNumber}`}>{groupNumber}</span> : null}
+          </>;
           return onSelect ? (
             <button
               type="button"
@@ -1020,6 +1032,22 @@ export default function PrintStudio() {
                       <div className="image-group-chip" key={group.id}>
                         <span className="image-group-color" style={{ backgroundColor: group.color }} aria-hidden="true" />
                         <span>{group.name}</span>
+                        <Button
+                          variant={group.numberImages ? "secondary" : "outline"}
+                          size="sm"
+                          className="image-group-number-button"
+                          aria-label={`${group.numberImages ? "Stop numbering" : "Number"} images in ${group.name}`}
+                          aria-pressed={group.numberImages === true}
+                          title={group.numberImages ? "Hide image numbers" : "Show numbers on group images"}
+                          onClick={() => setWorkspace((current) => ({
+                            ...current,
+                            groups: current.groups.map((candidate) => candidate.id === group.id
+                              ? { ...candidate, numberImages: !candidate.numberImages }
+                              : candidate),
+                          }))}
+                        >
+                          <ListOrdered size={13} aria-hidden="true" /> Number
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon-xs"

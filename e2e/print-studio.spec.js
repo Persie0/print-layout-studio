@@ -135,7 +135,7 @@ test("real workflow: show the disabled text action with readable contrast", asyn
     const style = getComputedStyle(button);
     return { foreground: style.color, background: style.backgroundColor };
   });
-  expect(colors).toEqual({ foreground: "rgb(67, 84, 90)", background: "rgb(228, 234, 231)" });
+  expect(colors).toEqual({ foreground: "rgb(97, 114, 118)", background: "rgb(228, 234, 231)" });
 });
 
 test("real workflow: auto-size typed text to the median detected image text", async ({ page }) => {
@@ -249,6 +249,10 @@ test("real workflow: group images by border color, persist groups, and enforce t
   await page.getByRole("button", { name: "New image group" }).click();
   await page.getByLabel("Group for second-group-image.png").click();
   await page.getByRole("option", { name: "Group 2" }).click();
+  await page.getByRole("button", { name: "Number images in Group 1" }).click();
+  await expect(page.getByRole("button", { name: "Stop numbering images in Group 1" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-image-number")).toHaveText("1");
+  await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText("1");
 
   const firstBorder = page.getByRole("button", { name: "Select image first-group-image.png" });
   const secondBorder = page.getByRole("button", { name: "Select image second-group-image.png" });
@@ -264,6 +268,7 @@ test("real workflow: group images by border color, persist groups, and enforce t
   await page.reload();
   await expect(page.getByLabel("Group for first-group-image.png")).toContainText("Group 1");
   await expect(page.getByLabel("Group for second-group-image.png")).toContainText("Group 2");
+  await expect(page.getByRole("button", { name: "Stop numbering images in Group 1" })).toHaveAttribute("aria-pressed", "true");
 
   for (let count = 2; count < 8; count += 1) {
     await page.getByRole("button", { name: "New image group" }).click();

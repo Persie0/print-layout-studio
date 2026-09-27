@@ -2,6 +2,7 @@ export type ImageGroup = {
   id: string;
   name: string;
   color: string;
+  numberImages?: boolean;
 };
 
 export const IMAGE_GROUP_COLORS: readonly string[];
