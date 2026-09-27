@@ -14,6 +14,31 @@ async function makePng(page, width = 32, height = 32) {
   return Buffer.from(dataUrl.split(",")[1], "base64");
 }
 
+async function makeTextPng(page, text, fontSize = 72) {
+  const dataUrl = await page.evaluate(({ content, size }) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 800;
+    canvas.height = 240;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#111";
+    context.font = `bold ${size}px Arial`;
+    context.fillText(content, 24, 160);
+    return canvas.toDataURL("image/png");
+  }, { content: text, size: fontSize });
+  return Buffer.from(dataUrl.split(",")[1], "base64");
+}
+
+async function pastePng(page, name, buffer) {
+  await page.locator(".app-shell").evaluate((shell, { filename, base64 }) => {
+    const bytes = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], filename, { type: "image/png" }));
+    shell.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
+  }, { filename: name, base64: buffer.toString("base64") });
+}
+
 async function openStudio(page) {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Arrange your pages" })).toBeVisible();
@@ -227,6 +252,89 @@ test("real workflow: render and persist LaTeX math on the print sheet", async ({
   await expect(page.getByLabel("Text format")).toContainText("LaTeX math");
   const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
   expect(pdf.length).toBeGreaterThan(1000);
+});
+
+test("real workflow: fit the whole sheet in the remaining viewport and zoom without inner scrolling", async ({ page }) => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    await openStudio(page);
+    const stage = page.locator(".paper-stage");
+    const sheet = page.locator(".paper-sheet:not(.print-sheet)");
+    await expect(sheet).toBeVisible();
+    await expect.poll(async () => {
+      const [stageBox, sheetBox] = await Promise.all([stage.boundingBox(), sheet.boundingBox()]);
+      return Boolean(stageBox && sheetBox && sheetBox.x >= stageBox.x - 1 && sheetBox.y >= stageBox.y - 1
+        && sheetBox.x + sheetBox.width <= stageBox.x + stageBox.width + 1
+        && sheetBox.y + sheetBox.height <= stageBox.y + stageBox.height + 1);
+    }).toBe(true);
+    await expect.poll(() => stage.evaluate((element) => element.scrollHeight <= element.clientHeight
+      && element.scrollWidth <= element.clientWidth)).toBe(true);
+
+    const fitBox = await sheet.boundingBox();
+    await page.getByRole("button", { name: "Zoom in" }).click();
+    await expect.poll(async () => (await sheet.boundingBox()).width).toBeGreaterThan(fitBox.width * 1.1);
+    const stageBox = await stage.boundingBox();
+    const beforePan = await sheet.boundingBox();
+    const dragX = stageBox.x + stageBox.width / 2;
+    const dragY = stageBox.y + stageBox.height / 2;
+    await page.mouse.move(dragX, dragY);
+    await page.mouse.down();
+    await page.mouse.move(dragX + 32, dragY + 24, { steps: 4 });
+    await page.mouse.up();
+    await expect.poll(async () => (await sheet.boundingBox()).x).toBeGreaterThan(beforePan.x + 15);
+    await page.getByRole("button", { name: "Fit page" }).click();
+    await expect.poll(async () => Math.abs((await sheet.boundingBox()).width - fitBox.width)).toBeLessThan(2);
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await expect.poll(async () => (await sheet.boundingBox()).width).toBeLessThan(fitBox.width);
+    await page.getByRole("button", { name: "Fit page" }).click();
+    await page.goto("about:blank");
+  }
+});
+
+test("real workflow: show OCR text size on preview images but keep labels out of print", async ({ page }) => {
+  await openStudio(page);
+  const square = await makePng(page, 900, 900);
+  await page.getByLabel("Choose images").setInputFiles({ name: "overlay-size.png", mimeType: "image/png", buffer: square });
+  await expect(page.getByRole("button", { name: "Select overlay-size.png" })).toBeVisible();
+  await saveOcrRatios(page, { "overlay-size.png": 0.05 });
+  await page.reload();
+
+  const previewLabel = page.locator(".paper-sheet:not(.print-sheet) .sheet-ocr-size");
+  await expect(previewLabel).toContainText("mm");
+  await expect(page.locator(".print-sheet .sheet-ocr-size")).toHaveCount(0);
+});
+
+test("real workflow: persist auto OCR on paste and leave file uploads unscanned", async ({ page }) => {
+  test.setTimeout(180_000);
+  await openStudio(page);
+  const autoOcr = page.getByRole("checkbox", { name: "Auto OCR pasted images" });
+  await expect(autoOcr).not.toBeChecked();
+
+  const ordinaryImage = await makePng(page);
+  await page.getByLabel("Choose images").setInputFiles({ name: "upload-only.png", mimeType: "image/png", buffer: ordinaryImage });
+  await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
+  await page.getByRole("button", { name: "Preview full image upload-only.png" }).click();
+  await page.keyboard.press("Escape");
+  await pastePng(page, "paste-while-off.png", ordinaryImage);
+  await expect(page.getByRole("button", { name: "Select paste-while-off.png" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "OCR status for paste-while-off.png" })).toHaveAttribute("data-result", "Not scanned");
+
+  await autoOcr.check();
+  await expect.poll(async () => (await readStoredWorkspace(page))?.autoOcrOnPaste).toBe(true);
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();
+  await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
+
+  const textImage = await makeTextPng(page, "AUTOPASTE");
+  await pastePng(page, "paste-ocr.png", textImage);
+  await expect(page.getByRole("button", { name: "Select paste-ocr.png" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "OCR status for paste-ocr.png" }))
+    .toHaveAttribute("data-result", "Text found", { timeout: 120_000 });
+  await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
+
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();
+  await expect(page.getByRole("status", { name: "OCR status for paste-ocr.png" })).toHaveAttribute("data-result", "Text found");
 });
 
 test("real workflow: delete an image and keep it deleted after reload", async ({ page }) => {

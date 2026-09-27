@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-img-element -- IndexedDB blob URLs are local-only images. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, DragEvent, ClipboardEvent } from "react";
+import type { CSSProperties, DragEvent, ClipboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   FileText,
   ImagePlus,
@@ -27,6 +27,7 @@ import { createImageGroup, MAX_IMAGE_GROUPS } from "@/lib/image-groups";
 import { choosePageLayout } from "@/lib/page-orientation";
 import { estimatePrintedTextHeightMm, estimateTextHeightRatio, getOcrStatusLabel, getTextMatchScaleFactors, getUnscannedImages } from "@/lib/text-matching";
 import { renderLatexToString } from "@/lib/latex-rendering";
+import { fitPageIntoFrame } from "@/lib/preview-fit";
 import { createPageArchive, readPageArchive } from "@/lib/page-archive";
 import { getPageSize, getPrintPageName, PAPER_FORMATS } from "@/lib/paper-formats";
 import { loadWorkspace, removeStoredImage, saveWorkspace } from "@/lib/storage";
@@ -39,6 +40,7 @@ const EMPTY_WORKSPACE: Workspace = {
   borderMm: 1,
   gapMm: 2,
   pageCount: 1,
+  autoOcrOnPaste: false,
   groups: [],
   images: [],
   texts: [],
@@ -164,6 +166,7 @@ function PageSheet({
   metrics,
   selectedItemId,
   onSelect,
+  previewSize,
   print = false,
 }: {
   workspace: Workspace;
@@ -172,6 +175,7 @@ function PageSheet({
   metrics: PageMetrics;
   selectedItemId?: string | null;
   onSelect?: (id: string) => void;
+  previewSize?: { width: number; height: number };
   print?: boolean;
 }) {
   const images = new Map(workspace.images.map((image) => [image.id, image]));
@@ -183,9 +187,12 @@ function PageSheet({
       width: `${metrics.width}pt`,
       height: `${metrics.height}pt`,
       page: metrics.orientation === "landscape" ? "sheetLandscape" : "sheetPortrait",
+    } : previewSize ? {
+      width: `${previewSize.width}px`,
+      height: `${previewSize.height}px`,
     } : {}),
     "--paper-width-pt": metrics.width,
-  } as CSSProperties;
+  } as CSSProperties & { "--paper-width-pt": number };
 
   return (
     <div
@@ -224,6 +231,19 @@ function PageSheet({
             "--image-border-color": group?.color ?? "#53656a",
           } as CSSProperties;
           const className = `sheet-image${selected ? " is-selected" : ""}`;
+          const ocrSizeLabel = !print && Number(image.textHeightRatio) > 0
+            ? printedTextSizeLabel(image, placement, workspace.borderMm)
+            : null;
+          const imageContent = (
+            <>
+              <PageImage image={image} src={imageUrls.get(image.id)} />
+              {ocrSizeLabel ? (
+                <span className="sheet-ocr-size" aria-label={`Current detected OCR text size: ${ocrSizeLabel}`}>
+                  {ocrSizeLabel}
+                </span>
+              ) : null}
+            </>
+          );
           return onSelect ? (
             <button
               type="button"
@@ -233,11 +253,11 @@ function PageSheet({
               onClick={() => onSelect(placement.id)}
               aria-label={`Select image ${image.name}`}
             >
-              <PageImage image={image} src={imageUrls.get(image.id)} />
+              {imageContent}
             </button>
           ) : (
-            <div className="sheet-image" style={imageStyle} key={placement.id}>
-              <PageImage image={image} src={imageUrls.get(image.id)} />
+            <div className="sheet-image" style={imageStyle} key={placement.id} data-sheet-item>
+              {imageContent}
             </div>
           );
         }
@@ -297,12 +317,20 @@ export default function PrintStudio() {
   const [dragging, setDragging] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
   const [ocrProgress, setOcrProgress] = useState("");
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
+  const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 });
+  const [previewPanning, setPreviewPanning] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [saveState, setSaveState] = useState<"loading" | "saving" | "saved" | "error">("loading");
   const [ready, setReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const archiveInputRef = useRef<HTMLInputElement>(null);
   const imageUrlsRef = useRef<Map<string, string>>(new Map());
+  const previewStageRef = useRef<HTMLDivElement>(null);
+  const panStartRef = useRef<{ pointerId: number; x: number; y: number; originX: number; originY: number } | null>(null);
+  const ocrQueueRef = useRef<StoredImage[]>([]);
+  const ocrRunningRef = useRef(false);
   const [imageUrls, setImageUrls] = useState<Map<string, string>>(new Map());
 
   useEffect(() => () => {
@@ -347,6 +375,23 @@ export default function PrintStudio() {
     return () => window.clearTimeout(timer);
   }, [ready, workspace]);
 
+  useEffect(() => {
+    const stage = previewStageRef.current;
+    if (!stage) return;
+    const measure = () => {
+      const bounds = stage.getBoundingClientRect();
+      setPreviewStageSize((current) => (
+        Math.abs(current.width - bounds.width) < 0.5 && Math.abs(current.height - bounds.height) < 0.5
+          ? current
+          : { width: bounds.width, height: bounds.height }
+      ));
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(stage);
+    measure();
+    return () => observer.disconnect();
+  }, [ready]);
+
   const imageScaleFactors = useMemo(() => getTextMatchScaleFactors(workspace.images), [workspace.images]);
   const activeMetrics = useMemo(
     () => calculatePage(workspace, activePage, imageScaleFactors),
@@ -373,7 +418,7 @@ export default function PrintStudio() {
     const candidates = Array.from(files).filter((file) => file.type.startsWith("image/"));
     if (candidates.length === 0) {
       setErrorMessage("Choose or paste image files to add them to a page.");
-      return;
+      return [];
     }
     setErrorMessage("");
     setSaveState("saving");
@@ -411,6 +456,7 @@ export default function PrintStudio() {
       setTargetPage(assignedPage);
       setSelectedItemId(null);
     }
+    return newImages;
   }, [targetPage]);
 
   const importPageZip = useCallback(async (file: File) => {
@@ -445,7 +491,13 @@ export default function PrintStudio() {
   }, [workspace.images, workspace.pageCount]);
 
   const scanImagesForText = useCallback(async (imagesToScan: StoredImage[], manualRescan = false) => {
-    if (imagesToScan.length === 0 || ocrRunning) return;
+    if (imagesToScan.length === 0) return;
+    if (ocrRunningRef.current) {
+      const queuedIds = new Set(ocrQueueRef.current.map((image) => image.id));
+      ocrQueueRef.current.push(...imagesToScan.filter((image) => !queuedIds.has(image.id)));
+      return;
+    }
+    ocrRunningRef.current = true;
     setOcrRunning(true);
     setOcrProgress("Loading English OCR…");
     setErrorMessage("");
@@ -484,12 +536,15 @@ export default function PrintStudio() {
           if (!ratios.has(image.id)) return image;
           const ratio = ratios.get(image.id);
           return { ...image, ocrScanned: true, textHeightRatio: ratio ?? undefined };
-        }),
+        }).concat(imagesToScan.filter((image) => !current.images.some((existing) => existing.id === image.id))
+          .map((image) => ({ ...image, ocrScanned: true, textHeightRatio: ratios.get(image.id) ?? undefined }))),
       }));
       if (manualRescan) {
         setErrorMessage(`Rescanned ${imagesToScan[0].name}. Text-size data updated.`);
       } else {
-        const nextImages = workspace.images.map((image) => ratios.has(image.id)
+        const existingImages = new Map(workspace.images.map((image) => [image.id, image]));
+        for (const image of imagesToScan) if (!existingImages.has(image.id)) existingImages.set(image.id, image);
+        const nextImages = [...existingImages.values()].map((image) => ratios.has(image.id)
           ? { ...image, ocrScanned: true, textHeightRatio: ratios.get(image.id) ?? undefined }
           : image);
         const recognizedCount = nextImages.filter((image) => Number(image.textHeightRatio) > 0).length;
@@ -501,10 +556,13 @@ export default function PrintStudio() {
       setErrorMessage(error instanceof Error ? `Text detection failed: ${error.message}` : "Text detection failed.");
     } finally {
       await worker?.terminate().catch(() => undefined);
+      ocrRunningRef.current = false;
       setOcrRunning(false);
       setOcrProgress("");
+      const queued = ocrQueueRef.current.splice(0);
+      if (queued.length > 0) void scanImagesForText(queued);
     }
-  }, [ocrRunning, workspace.images]);
+  }, [workspace.images]);
 
   const matchTextSizes = useCallback(() => {
     if (workspace.images.length === 0 || ocrRunning) return;
@@ -520,7 +578,7 @@ export default function PrintStudio() {
     void scanImagesForText([image], true);
   }, [scanImagesForText]);
 
-  const onPaste = useCallback((event: ClipboardEvent<HTMLDivElement>) => {
+  const onPaste = useCallback(async (event: ClipboardEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
     if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
     const files = Array.from(event.clipboardData.items)
@@ -529,8 +587,11 @@ export default function PrintStudio() {
       .filter((file): file is File => file !== null);
     if (files.length === 0) return;
     event.preventDefault();
-    void addFiles(files);
-  }, [addFiles]);
+    const addedImages = await addFiles(files);
+    if (workspace.autoOcrOnPaste && addedImages.length > 0) {
+      void scanImagesForText(addedImages);
+    }
+  }, [addFiles, scanImagesForText, workspace.autoOcrOnPaste]);
 
   const onDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -632,6 +693,49 @@ export default function PrintStudio() {
     [workspace, imageScaleFactors],
   );
   const currentPaper = PAPER_FORMATS[workspace.paper];
+  const previewSize = fitPageIntoFrame(
+    activeMetrics.width,
+    activeMetrics.height,
+    Math.max(1, previewStageSize.width - 32),
+    Math.max(1, previewStageSize.height - 32),
+    previewZoom,
+  );
+
+  const changePreviewZoom = (factor: number) => {
+    setPreviewZoom((current) => Math.min(3, Math.max(0.5, Number((current * factor).toFixed(2)))));
+  };
+
+  const fitPreview = () => {
+    setPreviewZoom(1);
+    setPreviewPan({ x: 0, y: 0 });
+  };
+
+  const onPreviewPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (previewZoom <= 1 || event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest(".sheet-image, .sheet-text")) return;
+    panStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      originX: previewPan.x,
+      originY: previewPan.y,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setPreviewPanning(true);
+  };
+
+  const onPreviewPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = panStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    setPreviewPan({ x: start.originX + event.clientX - start.x, y: start.originY + event.clientY - start.y });
+  };
+
+  const endPreviewPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    panStartRef.current = null;
+    setPreviewPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
 
   return (
     <div className="app-shell" onPaste={onPaste}>
@@ -868,6 +972,15 @@ export default function PrintStudio() {
             </div>
             <p className="storage-note">Your images stay in this browser on this device.</p>
             <p className="storage-note">Text matching downloads English OCR once, then analyzes images locally.</p>
+            <label className="auto-ocr-toggle">
+              <input
+                type="checkbox"
+                checked={workspace.autoOcrOnPaste}
+                onChange={(event) => setWorkspace((current) => ({ ...current, autoOcrOnPaste: event.target.checked }))}
+                aria-label="Auto OCR pasted images"
+              />
+              <span>Auto OCR on paste</span>
+            </label>
           </section>
 
           <section className="inspector-section text-editor-section">
@@ -1018,7 +1131,19 @@ export default function PrintStudio() {
               <p className="eyebrow">PRINT PREVIEW</p>
               <h1>Arrange your pages</h1>
             </div>
-            <div className="preview-spec">{currentPaper.label} · Auto {activeMetrics.orientation} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+            <div className="preview-actions">
+              <div className="preview-spec">{currentPaper.label} · Auto {activeMetrics.orientation} · {workspace.marginMm} mm edge · {workspace.borderMm} mm border · {workspace.gapMm} mm gap</div>
+              <div className="zoom-controls" aria-label="Page zoom controls">
+                <Button variant="outline" size="icon-sm" aria-label="Zoom out" onClick={() => changePreviewZoom(1 / 1.25)} disabled={previewZoom <= 0.5}>
+                  <Minus size={15} aria-hidden="true" />
+                </Button>
+                <span className="zoom-level" aria-label="Zoom level">{Math.round(previewZoom * 100)}%</span>
+                <Button variant="outline" size="icon-sm" aria-label="Zoom in" onClick={() => changePreviewZoom(1.25)} disabled={previewZoom >= 3}>
+                  <Plus size={15} aria-hidden="true" />
+                </Button>
+                <Button variant="outline" size="sm" aria-label="Fit page" onClick={fitPreview}>Fit page</Button>
+              </div>
+            </div>
           </div>
           <Tabs value={String(activePage)} onValueChange={(value) => {
             const page = Number(value);
@@ -1030,7 +1155,22 @@ export default function PrintStudio() {
               {pageOptions.map((page) => <TabsTrigger key={page} value={String(page)}>Page {page}</TabsTrigger>)}
             </TabsList>
             <TabsContent value={String(activePage)} className="page-tab-content">
-              <div className="paper-stage">
+              <div
+                ref={previewStageRef}
+                className={`paper-stage${previewZoom > 1 ? " is-zoomed" : ""}${previewPanning ? " is-panning" : ""}`}
+                onPointerDown={onPreviewPointerDown}
+                onPointerMove={onPreviewPointerMove}
+                onPointerUp={endPreviewPan}
+                onPointerCancel={endPreviewPan}
+              >
+                <div
+                  className="paper-zoom-layer"
+                  style={{
+                    width: `${previewSize.width}px`,
+                    height: `${previewSize.height}px`,
+                    transform: `translate(calc(-50% + ${previewPan.x}px), calc(-50% + ${previewPan.y}px))`,
+                  }}
+                >
                 <PageSheet
                   workspace={workspace}
                   imageUrls={imageUrls}
@@ -1038,7 +1178,9 @@ export default function PrintStudio() {
                   metrics={activeMetrics}
                   selectedItemId={selectedItemId}
                   onSelect={setSelectedItemId}
+                  previewSize={previewSize}
                 />
+                </div>
               </div>
               <div className="preview-footer">
                 <span>Images keep their proportions · text prints at its chosen size</span>

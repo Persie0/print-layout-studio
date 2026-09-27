@@ -29,6 +29,7 @@ export type Workspace = {
   borderMm: number;
   gapMm: number;
   pageCount: number;
+  autoOcrOnPaste: boolean;
   images: StoredImage[];
   texts: StoredText[];
   groups: ImageGroup[];
@@ -104,6 +105,7 @@ export async function loadWorkspace(): Promise<Workspace | null> {
     borderMm: Number.isFinite(storedBorderMm) ? Math.max(0, Math.min(10, storedBorderMm)) : 1,
     gapMm: Number.isFinite(storedGapMm) ? Math.max(0, Math.min(20, storedGapMm)) : 2,
     pageCount: Math.max(1, Math.min(30, Number(record.pageCount) || 1)),
+    autoOcrOnPaste: record.autoOcrOnPaste === true,
     groups,
     images: metadata.flatMap((image) => {
       const blob = byId.get(image.id);
