@@ -39,7 +39,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await page.getByRole("button", { name: "Add text block" }).click();
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
   await expect(page.getByText(/A5 · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
-  await expect(page.getByText("Keep this complete caption together on page two.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select text block: Keep this complete caption together on page two." })).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
 
   await page.reload();
