@@ -325,6 +325,7 @@ export default function PrintStudio() {
   const [draftText, setDraftText] = useState("");
   const [draftFontSize, setDraftFontSize] = useState(16);
   const [matchImageTextSize, setMatchImageTextSize] = useState(true);
+  const [textSizeAdjustmentPercent, setTextSizeAdjustmentPercent] = useState(0);
   const [draftTextFormat, setDraftTextFormat] = useState<"plain" | "latex" | "markdown">("plain");
   const [splitTextOnBlankLines, setSplitTextOnBlankLines] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -431,6 +432,9 @@ export default function PrintStudio() {
     // Printed OCR boxes are roughly 70% of the CSS font size for typical text.
     return Math.max(8, Math.min(72, Math.round(medianHeightMm * PT_PER_MM / 0.7)));
   }, [activeMetrics, activePage, imageScaleFactors, targetPage, workspace]);
+  const adjustedImageTextFontSize = matchedTextFontSize === null
+    ? null
+    : Math.max(8, Math.min(72, Math.round(matchedTextFontSize * (1 + textSizeAdjustmentPercent / 100))));
   const activeImages = workspace.images.filter((image) => image.page === activePage);
   const activeTexts = workspace.texts.filter((text) => text.page === activePage);
   const selectedText = workspace.texts.find((text) => text.id === selectedItemId) ?? null;
@@ -710,8 +714,8 @@ export default function PrintStudio() {
       setErrorMessage("Write something before adding a text block.");
       return;
     }
-    const fontSize = matchImageTextSize && matchedTextFontSize !== null
-      ? matchedTextFontSize
+    const fontSize = matchImageTextSize && adjustedImageTextFontSize !== null
+      ? adjustedImageTextFontSize
       : Math.max(8, Math.min(72, Number(draftFontSize) || 16));
     setErrorMessage("");
     if (selectedText) {
@@ -730,7 +734,7 @@ export default function PrintStudio() {
       setActivePage(targetPage);
       setSelectedItemId(texts[0]?.id ?? null);
     }
-  }, [draftFontSize, draftText, draftTextFormat, matchImageTextSize, matchedTextFontSize, selectedText, splitTextOnBlankLines, targetPage]);
+  }, [adjustedImageTextFontSize, draftFontSize, draftText, draftTextFormat, matchImageTextSize, selectedText, splitTextOnBlankLines, targetPage]);
 
   const startNewText = useCallback(() => {
     setSelectedItemId(null);
@@ -1120,11 +1124,27 @@ export default function PrintStudio() {
                   type="number"
                   min={8}
                   max={72}
-                  value={matchImageTextSize && matchedTextFontSize !== null ? matchedTextFontSize : draftFontSize}
-                  readOnly={matchImageTextSize && matchedTextFontSize !== null}
+                  value={matchImageTextSize && adjustedImageTextFontSize !== null ? adjustedImageTextFontSize : draftFontSize}
+                  readOnly={matchImageTextSize && adjustedImageTextFontSize !== null}
                   onChange={(event) => setDraftFontSize(Math.max(8, Math.min(72, Number(event.target.value) || 8)))}
                 />
                 <span>pt</span>
+              </div>
+              <label className="text-size-adjustment-label" htmlFor="text-size-adjustment">Adjust</label>
+              <div className="margin-input-wrap text-size-adjustment-wrap">
+                <Input
+                  id="text-size-adjustment"
+                  className="text-size-adjustment-input"
+                  type="number"
+                  min={-75}
+                  max={100}
+                  step={5}
+                  value={textSizeAdjustmentPercent}
+                  disabled={!matchImageTextSize || matchedTextFontSize === null}
+                  onChange={(event) => setTextSizeAdjustmentPercent(Math.max(-75, Math.min(100, Number(event.target.value) || 0)))}
+                  aria-label="Adjust text size from image percent"
+                />
+                <span>%</span>
               </div>
           <Button className="text-save-button" onClick={saveText} disabled={!draftText.trim()}>
                 <Plus size={15} aria-hidden="true" />
@@ -1138,7 +1158,7 @@ export default function PrintStudio() {
                 onChange={(event) => setMatchImageTextSize(event.target.checked)}
                 aria-label="Match typed text to image text size"
               />
-              <span>{matchedTextFontSize === null ? "Match image text size (scan images first)" : `Match image text size (${matchedTextFontSize} pt)`}</span>
+              <span>{adjustedImageTextFontSize === null ? "Match image text size (scan images first)" : `Match image text size (${adjustedImageTextFontSize} pt)`}</span>
             </label>
             <label className="split-text-toggle">
               <input

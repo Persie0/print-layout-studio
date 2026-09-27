@@ -152,10 +152,17 @@ test("real workflow: auto-size typed text to the median detected image text", as
   const matchedSize = Number(await typeSize.inputValue());
   expect(matchedSize).toBeGreaterThan(8);
   expect(matchedSize).toBeLessThan(72);
+  const adjustment = page.getByLabel("Adjust text size from image percent");
+  await adjustment.fill("20");
+  const adjustedSize = Math.round(matchedSize * 1.2);
+  await expect(typeSize).toHaveValue(String(Math.min(72, adjustedSize)));
+  await adjustment.fill("-10");
+  const smallerSize = Math.round(matchedSize * 0.9);
+  await expect(typeSize).toHaveValue(String(Math.max(8, smallerSize)));
 
   await page.getByLabel("Text block content").fill("Text sized to match the image");
   await page.getByRole("button", { name: "Add text block" }).click();
-  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.fontSize).toBe(matchedSize);
+  await expect.poll(async () => (await readStoredWorkspace(page))?.texts?.[0]?.fontSize).toBe(Math.max(8, smallerSize));
 
   await autoSize.uncheck();
   await expect(typeSize).not.toHaveAttribute("readonly", "");

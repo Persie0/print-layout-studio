@@ -227,6 +227,8 @@ button { cursor: pointer; }
 .split-text-toggle input { width: 15px; height: 15px; flex: none; margin: 1px 0 0; accent-color: #526b20; }
 .text-format-select { width: 112px; height: 36px; padding-inline: 9px; font-size: 13px; }
 .text-size-input[data-slot="input"] { width: 66px; height: 36px; padding: 0 8px; }
+.text-size-adjustment-label { color: #52666b; font-size: 12px; }
+.text-size-adjustment-input[data-slot="input"] { width: 62px; height: 36px; padding: 0 7px; }
 .text-save-button[data-slot="button"] { height: 36px; margin-left: auto; padding: 0 12px; color: #fff !important; background: #19353b; font-size: 14px; }
 .text-save-button:hover { color: #fff !important; background: #294950; }
 .text-save-button:disabled, .text-save-button:disabled:hover { color: #617276 !important; background: #e4eae7; opacity: 1; cursor: not-allowed; }
