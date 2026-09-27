@@ -75,6 +75,8 @@ test("real workflow: move an image to another page and restore the assignment af
   await page.getByRole("tab", { name: "Page 2" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toBeVisible();
   await expect(page.getByText("Page 2 items")).toBeVisible();
+  await expect(page.getByText("Saving on this device…")).toBeVisible();
+  await expect(page.getByText("Saved on this device")).toBeVisible();
   await page.getByRole("tab", { name: "Page 1" }).click();
   await expect(page.getByRole("button", { name: "Select move-me.png" })).toHaveCount(0);
 
@@ -154,7 +156,6 @@ test("real workflow: preview the original image in a full-resolution popover", a
 test("real workflow: OCR text and resize images to match their printed letter height", async ({ page }) => {
   test.setTimeout(120_000);
   await openStudio(page);
-  const png = await makePng(page);
   const makeTextImage = async (text, fontSize) => {
     const dataUrl = await page.evaluate(({ content, size }) => {
       const canvas = document.createElement("canvas");
