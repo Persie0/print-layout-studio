@@ -180,18 +180,18 @@ test("real workflow: OCR text and resize images to match their printed letter he
   await expect(page.getByRole("alert")).toContainText("Matched text size in 2 of 2 images.", { timeout: 120_000 });
   const largeOcrStatus = page.getByRole("status", { name: "OCR status for large-copy.png" });
   const smallOcrStatus = page.getByRole("status", { name: "OCR status for small-copy.png" });
-  await expect(largeOcrStatus).toHaveText("Text found");
-  await expect(smallOcrStatus).toHaveText("Text found");
+  await expect(largeOcrStatus).toHaveAttribute("data-result", "Text found");
+  await expect(smallOcrStatus).toHaveAttribute("data-result", "Text found");
 
   const large = await page.getByRole("button", { name: "Select image large-copy.png" }).boundingBox();
   const small = await page.getByRole("button", { name: "Select image small-copy.png" }).boundingBox();
   expect(small.height).toBeGreaterThan(large.height * 1.5);
 
   await page.reload();
-  await expect(page.getByRole("status", { name: "OCR status for large-copy.png" })).toHaveText("Text found");
+  await expect(page.getByRole("status", { name: "OCR status for large-copy.png" })).toHaveAttribute("data-result", "Text found");
   await page.getByRole("button", { name: "Match text size" }).click();
   await expect(page.getByRole("alert")).toContainText("All images were already scanned");
   await page.getByRole("button", { name: "Rescan OCR for small-copy.png" }).click();
   await expect(page.getByRole("alert")).toContainText("Rescanned small-copy.png. Text-size data updated.", { timeout: 120_000 });
-  await expect(page.getByRole("status", { name: "OCR status for small-copy.png" })).toHaveText("Text found");
+  await expect(page.getByRole("status", { name: "OCR status for small-copy.png" })).toHaveAttribute("data-result", "Text found");
 });
