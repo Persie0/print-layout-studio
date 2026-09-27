@@ -115,7 +115,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await page.getByLabel("Type size").fill("18");
   await page.getByRole("button", { name: "Add text block" }).click();
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
-  await expect(page.getByText(/A5 · Auto portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
+  await expect(page.getByText(/A5 · Auto · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Select text block: Keep this complete caption together on page two." })).toBeVisible();
   await expect(page.getByText("Saved on this device")).toBeVisible();
 
@@ -123,7 +123,7 @@ test("real workflow: add page items, adjust print settings, and restore them aft
   await expect(page.getByRole("button", { name: "Select red-square.png" })).toBeVisible();
   await expect(page.getByLabel("Gap between images in millimeters")).toHaveValue("6");
   await expect(page.getByLabel("Image border width in millimeters")).toHaveValue("2");
-  await expect(page.getByText(/A5 · Auto portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
+  await expect(page.getByText(/A5 · Auto · portrait · .*2 mm border · 6 mm gap/)).toBeVisible();
   await expect(page.getByRole("tab", { name: "Page 2" })).toBeVisible();
 });
 
@@ -148,7 +148,7 @@ test("real workflow: auto-rotate each sheet for its photos and print both paper 
   });
 
   await page.getByRole("tab", { name: "Page 1" }).click();
-  await expect(page.getByText(/A4 · Auto landscape ·/)).toBeVisible();
+  await expect(page.getByText(/A4 · Auto · landscape ·/)).toBeVisible();
   const printPageOne = page.locator('.print-sheet[data-page-number="1"]');
   const printPageTwo = page.locator('.print-sheet[data-page-number="2"]');
   await expect(printPageOne).toHaveAttribute("data-orientation", "landscape");
@@ -165,7 +165,7 @@ test("real workflow: auto-rotate each sheet for its photos and print both paper 
 });
 
 test("real workflow: lets users force portrait or landscape and remembers the setting", async ({ page }) => {
-  await page.goto("/");
+  await openStudio(page);
 
   const orientation = page.getByRole("combobox", { name: "Orientation" });
   await orientation.click();
