@@ -290,6 +290,19 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
   await page.emulateMedia({ media: "screen" });
   const pdfText = pdf.toString("latin1");
   const pageObjectCount = [...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length;
+  const pageObjects = [...pdfText.matchAll(/(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g)]
+    .filter((match) => /\/Type\s*\/Page\b/.test(match[2]))
+    .map((match) => ({
+      id: match[1],
+      mediaBox: match[2].match(/\/MediaBox\s*\[([^\]]+)\]/)?.[1],
+      contents: match[2].match(/\/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)/)?.[1],
+    }));
+  const printLayout = await page.locator(".print-page").evaluateAll((sheets) => sheets.map((sheet) => {
+    const style = getComputedStyle(sheet);
+    const rect = sheet.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, breakAfter: style.breakAfter, page: style.page };
+  }));
+  console.log("print-pdf-debug", JSON.stringify({ pageObjectCount, pageObjects, printLayout }));
   expect(pageObjectCount).toBe(2);
   const boxes = [...pdfText.matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
     .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
@@ -533,8 +546,12 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   expect(movedImagesAfter).toHaveLength(2);
   expect(movedImagesAfter.every((image) => image.page === 1 && image.groupId === movedGroup.id)).toBe(true);
   expect(workspaceAfter.images.find((image) => image.name === "balance-p1-b.png").groupId).toBe(originalGroupTwo.id);
-  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-b.png"] .sheet-image-number')).toHaveText("1");
-  await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-c.png"] .sheet-image-number')).toHaveText("2");
+  const movedImageOneNumber = page.locator('.print-sheet[data-page-number="1"] img[alt="balance-p2-b.png"]')
+    .locator("xpath=..").locator(".sheet-image-number");
+  const movedImageTwoNumber = page.locator('.print-sheet[data-page-number="1"] img[alt="balance-p2-c.png"]')
+    .locator("xpath=..").locator(".sheet-image-number");
+  await expect(movedImageOneNumber).toHaveText("1");
+  await expect(movedImageTwoNumber).toHaveText("2");
 
   const pageOneAfter = await readPageAverageMm(page, 1);
   const pageTwoAfter = await readPageAverageMm(page, 2);
@@ -602,23 +619,30 @@ test("real workflow: retain a group's number when balancing moves it intact to a
   const balanceButton = page.getByRole("button", { name: "Balance pages" });
   await expect(balanceButton).toBeEnabled();
   const workspaceBefore = await readStoredWorkspace(page);
+  const originalGroup = workspaceBefore.groups.find((group) => group.name === "Group 2");
+  const imageIdsToMove = workspaceBefore.images
+    .filter((image) => image.page === 2 && image.groupId === originalGroup?.id)
+    .map((image) => image.id);
   await balanceButton.click();
+  await expect.poll(async () => {
+    const workspace = await readStoredWorkspace(page);
+    return workspace?.images.filter((image) => imageIdsToMove.includes(image.id))
+      .map((image) => ({ page: image.page, groupId: image.groupId }));
+  }).toEqual(imageIdsToMove.map(() => ({ page: 1, groupId: originalGroup?.id })));
   const workspaceAfter = await readStoredWorkspace(page);
   const moveText = await page.getByRole("status", { name: "Page balance result" }).textContent();
   const movedGroupNames = moveText?.match(/(Group [23]) Page 2 → (Group [23]) Page 1/);
   expect(movedGroupNames).toBeTruthy();
   expect(movedGroupNames?.[1]).toBe(movedGroupNames?.[2]);
-  const originalGroup = workspaceBefore.groups.find((group) => group.name === movedGroupNames?.[1]);
+  const movedSourceGroup = workspaceBefore.groups.find((group) => group.name === movedGroupNames?.[1]);
   const resultingGroup = workspaceAfter.groups.find((group) => group.name === movedGroupNames?.[2]);
-  expect(originalGroup).toBeTruthy();
-  expect(resultingGroup?.id).toBe(originalGroup?.id);
-  const imageIdsToMove = new Set(workspaceBefore.images
-    .filter((image) => image.page === 2 && image.groupId === originalGroup?.id)
-    .map((image) => image.id));
-  expect(imageIdsToMove.size).toBe(2);
-  const movedImages = workspaceAfter.images.filter((image) => imageIdsToMove.has(image.id));
+  expect(movedSourceGroup).toBeTruthy();
+  expect(resultingGroup?.id).toBe(movedSourceGroup?.id);
+  const imageIdsToMoveSet = new Set(imageIdsToMove);
+  expect(imageIdsToMoveSet.size).toBe(2);
+  const movedImages = workspaceAfter.images.filter((image) => imageIdsToMoveSet.has(image.id));
   expect(movedImages).toHaveLength(2);
-  expect(movedImages.every((image) => image.page === 1 && image.groupId === originalGroup?.id)).toBe(true);
+  expect(movedImages.every((image) => image.page === 1 && image.groupId === movedSourceGroup?.id)).toBe(true);
   expect(workspaceAfter.groups.map((group) => group.name)).toEqual(["Group 1", "Group 2", "Group 3"]);
 });
 
