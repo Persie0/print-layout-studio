@@ -289,6 +289,21 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
   await page.emulateMedia({ media: "print" });
   const rotatedSheetTransform = await printPageOne.evaluate((sheet) => getComputedStyle(sheet).transform);
   expect(rotatedSheetTransform).not.toBe("none");
+  const rotatedSheetBounds = await printPageOne.evaluate((sheet) => {
+    const page = sheet.closest(".print-page");
+    const sheetRect = sheet.getBoundingClientRect();
+    const pageRect = page.getBoundingClientRect();
+    return {
+      left: sheetRect.left - pageRect.left,
+      top: sheetRect.top - pageRect.top,
+      right: pageRect.right - sheetRect.right,
+      bottom: pageRect.bottom - sheetRect.bottom,
+    };
+  });
+  expect(rotatedSheetBounds.left).toBeGreaterThanOrEqual(-1);
+  expect(rotatedSheetBounds.top).toBeGreaterThanOrEqual(-1);
+  expect(rotatedSheetBounds.right).toBeGreaterThanOrEqual(-1);
+  expect(rotatedSheetBounds.bottom).toBeGreaterThanOrEqual(-1);
   const printLayout = await page.locator(".print-page").evaluateAll((sheets) => sheets.map((sheet) => {
     const style = getComputedStyle(sheet);
     const rect = sheet.getBoundingClientRect();
