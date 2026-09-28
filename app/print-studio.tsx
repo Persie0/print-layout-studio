@@ -918,6 +918,7 @@ export default function PrintStudio() {
     Math.max(1, previewStageSize.height - 4),
     previewZoom,
   );
+  const printPaperSize = getPageSize(workspace.paper, "portrait");
 
   const changePreviewZoom = (factor: number) => {
     setPreviewZoom((current) => Math.min(3, Math.max(0.5, Number((current * factor).toFixed(2)))));
@@ -1573,12 +1574,11 @@ export default function PrintStudio() {
         </section>
       </main>
 
-      <div className="print-document" aria-hidden="true">
+      <div className="print-document" style={{ width: `${printPaperSize.width}pt` }} aria-hidden="true">
         {pageOptions.map((page, index) => {
-          const portraitPaper = getPageSize(workspace.paper, "portrait");
           const printPageStyle = {
-            width: `${portraitPaper.width}pt`,
-            height: `${portraitPaper.height}pt`,
+            width: `${printPaperSize.width}pt`,
+            height: `${printPaperSize.height}pt`,
           } as CSSProperties;
           return (
             <div key={`print-page-${page}`} className="print-page" style={printPageStyle}>
