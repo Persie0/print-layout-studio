@@ -330,6 +330,7 @@ test("real workflow: export a complete workspace and import it in a fresh browse
   await page.reload();
   await expect(page.getByText("Saved on this device")).toBeVisible();
   await page.getByRole("button", { name: "New image group" }).click();
+  await expect(page.getByText("1/8")).toBeVisible();
   const imageGroup = page.getByLabel("Group for portable-scan.png");
   await imageGroup.click();
   await page.getByRole("option", { name: "Group 1" }).click();
@@ -368,6 +369,7 @@ test("real workflow: export a complete workspace and import it in a fresh browse
     await expect(restorePage.getByRole("button", { name: /Edit text block: Portable caption/ })).toBeVisible();
     await expect(restorePage.getByRole("checkbox", { name: "Automatically match image text sizes" })).not.toBeChecked();
     await expect(restorePage.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();
+    await expect.poll(async () => (await readStoredWorkspace(restorePage))?.groups?.length ?? 0).toBe(1);
     const restored = await readStoredWorkspace(restorePage);
     expect(restored.images[0]).toMatchObject({ ocrScanned: true, textHeightRatio: 0.05, groupId: restored.groups[0].id });
     expect(restored.texts[0]).toMatchObject({ content: "Portable caption", autoSize: true });
@@ -430,6 +432,7 @@ test("real workflow: print sequential small numbers on every image in a group", 
   const names = ["number-one.png", "number-two.png", "number-three.png", "number-four.png"];
   await page.getByLabel("Choose images").setInputFiles(names.map((name) => ({ name, mimeType: "image/png", buffer: png })));
   await page.getByRole("button", { name: "New image group" }).click();
+  await expect(page.getByText("1/8")).toBeVisible();
   for (const name of names) {
     const imageGroup = page.getByLabel(`Group for ${name}`);
     await imageGroup.click();
@@ -437,7 +440,10 @@ test("real workflow: print sequential small numbers on every image in a group", 
     await expect(imageGroup).toContainText("Group 1");
   }
 
-  await page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" }).check();
+  const numbering = page.getByRole("checkbox", { name: "Print small numbers on Group 1 images" });
+  await numbering.check();
+  await expect(numbering).toBeChecked();
+  await expect.poll(async () => (await readStoredWorkspace(page))?.groups?.[0]?.numberImages).toBe(true);
   await expect(page.locator(".paper-sheet:not(.print-sheet) .sheet-image-number")).toHaveText(["1", "2", "3", "4"]);
   await expect(page.locator('.print-sheet[data-page-number="1"] .sheet-image-number')).toHaveText(["1", "2", "3", "4"]);
   await page.reload();
@@ -452,10 +458,15 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   const square = await makePng(page, 640, 640);
   const pageOneNames = ["balance-p1-a.png", "balance-p1-b.png", "balance-p1-c.png"];
   await page.getByLabel("Choose images").setInputFiles(pageOneNames.map((name) => ({ name, mimeType: "image/png", buffer: square })));
-  for (let index = 0; index < 3; index += 1) await page.getByRole("button", { name: "New image group" }).click();
+  for (let index = 0; index < 3; index += 1) {
+    await page.getByRole("button", { name: "New image group" }).click();
+    await expect(page.getByText(`${index + 1}/8`)).toBeVisible();
+  }
   for (const [index, name] of pageOneNames.entries()) {
-    await page.getByLabel(`Group for ${name}`).click();
+    const groupSelect = page.getByLabel(`Group for ${name}`);
+    await groupSelect.click();
     await page.getByRole("option", { name: `Group ${index + 1}` }).click();
+    await expect(groupSelect).toContainText(`Group ${index + 1}`);
   }
 
   await page.getByRole("checkbox", { name: "Print small numbers on Group 2 images" }).check();
@@ -463,9 +474,19 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   const pageTwoNames = ["balance-p2-a.png", "balance-p2-b.png", "balance-p2-c.png"];
   await page.getByLabel("Choose images").setInputFiles(pageTwoNames.map((name) => ({ name, mimeType: "image/png", buffer: square })));
   for (const [index, name] of pageTwoNames.entries()) {
-    await page.getByLabel(`Group for ${name}`).click();
+    const groupSelect = page.getByLabel(`Group for ${name}`);
+    await groupSelect.click();
     await page.getByRole("option", { name: index === 0 ? "Group 1" : "Group 2" }).click();
+    await expect(groupSelect).toContainText(index === 0 ? "Group 1" : "Group 2");
   }
+  await expect.poll(async () => {
+    const workspace = await readStoredWorkspace(page);
+    const groupsById = new Map(workspace?.groups.map((group) => [group.id, group.name]));
+    return pageOneNames.concat(pageTwoNames).map((name) => {
+      const image = workspace?.images.find((candidate) => candidate.name === name);
+      return image ? groupsById.get(image.groupId) : null;
+    });
+  }).toEqual(["Group 1", "Group 2", "Group 3", "Group 1", "Group 2", "Group 2"]);
 
   await saveOcrRatios(page, {
     "balance-p1-a.png": 0.01,
@@ -483,7 +504,18 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   await page.getByRole("button", { name: "Choose pages to balance" }).click();
   const balanceButton = page.getByRole("button", { name: "Balance pages" });
   await expect(balanceButton).toBeDisabled();
-  await page.getByRole("checkbox", { name: "Include Page 2 in balancing" }).check();
+  const includePageTwo = page.getByRole("checkbox", { name: "Include Page 2 in balancing" });
+  await includePageTwo.check();
+  await expect(includePageTwo).toBeChecked();
+  if (await balanceButton.isDisabled()) {
+    const stored = await readStoredWorkspace(page);
+    console.log("balance-plan-debug", JSON.stringify({
+      hint: await page.locator(".balance-pages-hint").textContent(),
+      selectedPages: await page.getByRole("button", { name: "Choose pages to balance" }).textContent(),
+      images: stored?.images?.map(({ name, page, groupId, textHeightRatio }) => ({ name, page, groupId, textHeightRatio })),
+      groups: stored?.groups?.map(({ id, name }) => ({ id, name })),
+    }));
+  }
   await expect(balanceButton).toBeEnabled();
 
   const pageOneBefore = await readPageAverageMm(page, 1);
@@ -530,8 +562,10 @@ test("real workflow: retain a group's number when balancing moves it intact to a
   const square = await makePng(page, 900, 900);
   await page.getByLabel("Choose images").setInputFiles({ name: "reuse-page-one.png", mimeType: "image/png", buffer: square });
   await page.getByRole("button", { name: "New image group" }).click();
+  await expect(page.getByText("1/8")).toBeVisible();
   await page.getByLabel("Group for reuse-page-one.png").click();
   await page.getByRole("option", { name: "Group 1" }).click();
+  await expect(page.getByLabel("Group for reuse-page-one.png")).toContainText("Group 1");
   await page.getByRole("button", { name: "Add one page" }).click();
   await page.getByLabel("Choose images").setInputFiles([
     { name: "reuse-moving-a.png", mimeType: "image/png", buffer: square },
@@ -540,15 +574,30 @@ test("real workflow: retain a group's number when balancing moves it intact to a
     { name: "reuse-staying-b.png", mimeType: "image/png", buffer: square },
   ]);
   await page.getByRole("button", { name: "New image group" }).click();
+  await expect(page.getByText("2/8")).toBeVisible();
   for (const name of ["reuse-moving-a.png", "reuse-moving-b.png"]) {
-    await page.getByLabel(`Group for ${name}`).click();
+    const groupSelect = page.getByLabel(`Group for ${name}`);
+    await groupSelect.click();
     await page.getByRole("option", { name: "Group 2" }).click();
+    await expect(groupSelect).toContainText("Group 2");
   }
   await page.getByRole("button", { name: "New image group" }).click();
+  await expect(page.getByText("3/8")).toBeVisible();
   for (const name of ["reuse-staying-a.png", "reuse-staying-b.png"]) {
-    await page.getByLabel(`Group for ${name}`).click();
+    const groupSelect = page.getByLabel(`Group for ${name}`);
+    await groupSelect.click();
     await page.getByRole("option", { name: "Group 3" }).click();
+    await expect(groupSelect).toContainText("Group 3");
   }
+  await expect.poll(async () => {
+    const workspace = await readStoredWorkspace(page);
+    const groupsById = new Map(workspace?.groups.map((group) => [group.id, group.name]));
+    return ["reuse-page-one.png", "reuse-moving-a.png", "reuse-moving-b.png", "reuse-staying-a.png", "reuse-staying-b.png"]
+      .map((name) => {
+        const image = workspace?.images.find((candidate) => candidate.name === name);
+        return image ? groupsById.get(image.groupId) : null;
+      });
+  }).toEqual(["Group 1", "Group 2", "Group 2", "Group 3", "Group 3"]);
   await saveOcrRatios(page, {
     "reuse-page-one.png": 0.01,
     "reuse-moving-a.png": 0.08,
