@@ -319,6 +319,7 @@ button { cursor: pointer; }
 .paper-stage.is-zoomed { cursor: grab; }
 .paper-stage.is-panning { cursor: grabbing; }
 .paper-zoom-layer { position: absolute; top: 50%; left: 50%; pointer-events: none; }
+.paper-stage:not(.is-zoomed) .paper-zoom-layer { transform: translate(-50%, -50%) !important; }
 .paper-sheet { position: relative; container-type: inline-size; width: min(100%, 560px); flex: none; overflow: hidden; background: #fff; box-shadow: 0 7px 22px rgb(20 39 46 / 15%), 0 0 0 1px rgb(20 39 46 / 8%); pointer-events: auto; }
 .sheet-image { position: absolute; display: block; box-sizing: border-box; overflow: hidden; margin: 0; padding: 0; border: var(--image-border-width, 1mm) solid var(--image-border-color, #53656a); background: #fff; }
 button.sheet-image { cursor: pointer; }
