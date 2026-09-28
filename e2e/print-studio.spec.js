@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { unzipSync, zipSync } from "fflate";
+import { inflateSync } from "node:zlib";
 
 async function makePng(page, width = 32, height = 32) {
   const dataUrl = await page.evaluate(({ imageWidth, imageHeight }) => {
@@ -286,6 +287,15 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
   await page.emulateMedia({ media: "print" });
   const rotatedSheetTransform = await printPageOne.evaluate((sheet) => getComputedStyle(sheet).transform);
   expect(rotatedSheetTransform).not.toBe("none");
+  const printLayout = await page.locator(".print-page").evaluateAll((sheets) => sheets.map((sheet) => {
+    const style = getComputedStyle(sheet);
+    const rect = sheet.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, breakAfter: style.breakAfter, page: style.page };
+  }));
+  const printDocumentLayout = await page.locator(".print-document").evaluate((documentNode) => {
+    const rect = documentNode.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, childCount: documentNode.children.length };
+  });
   const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
   await page.emulateMedia({ media: "screen" });
   const pdfText = pdf.toString("latin1");
@@ -297,12 +307,31 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
       mediaBox: match[2].match(/\/MediaBox\s*\[([^\]]+)\]/)?.[1],
       contents: match[2].match(/\/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)/)?.[1],
     }));
-  const printLayout = await page.locator(".print-page").evaluateAll((sheets) => sheets.map((sheet) => {
-    const style = getComputedStyle(sheet);
-    const rect = sheet.getBoundingClientRect();
-    return { width: rect.width, height: rect.height, breakAfter: style.breakAfter, page: style.page };
-  }));
-  console.log("print-pdf-debug", JSON.stringify({ pageObjectCount, pageObjects, printLayout }));
+  const pageStreams = pageObjects.map((pageObject) => {
+    const contentId = pageObject.contents?.match(/^(\d+)/)?.[1];
+    if (!contentId) return { pageId: pageObject.id, streamBytes: null, drawOperations: null };
+    const objectStart = pdfText.indexOf(`${contentId} 0 obj`);
+    const objectEnd = pdfText.indexOf("endobj", objectStart);
+    const objectHeader = pdfText.slice(objectStart, objectEnd);
+    const streamStartMatch = objectHeader.match(/stream\r?\n/);
+    const length = Number(objectHeader.match(/\/Length\s+(\d+)/)?.[1]);
+    if (!streamStartMatch || !Number.isFinite(length)) return { pageId: pageObject.id, streamBytes: null, drawOperations: null };
+    const byteStart = objectStart + streamStartMatch.index + streamStartMatch[0].length;
+    const encoded = pdf.subarray(byteStart, byteStart + length);
+    let decoded = encoded;
+    if (/\/FlateDecode\b/.test(objectHeader)) {
+      try { decoded = inflateSync(encoded); } catch { /* Keep the encoded stream in the diagnostics. */ }
+    }
+    const operations = decoded.toString("latin1");
+    return {
+      pageId: pageObject.id,
+      streamBytes: length,
+      decodedBytes: decoded.length,
+      drawOperations: (operations.match(/\/[A-Za-z0-9]+\s+Do\b/g) ?? []).length,
+      snippet: operations.slice(0, 90),
+    };
+  });
+  console.log("print-pdf-debug", JSON.stringify({ pageObjectCount, pageObjects, pageStreams, printLayout, printDocumentLayout }));
   expect(pageObjectCount).toBe(2);
   const boxes = [...pdfText.matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
     .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
@@ -619,27 +648,26 @@ test("real workflow: retain a group's number when balancing moves it intact to a
   const balanceButton = page.getByRole("button", { name: "Balance pages" });
   await expect(balanceButton).toBeEnabled();
   const workspaceBefore = await readStoredWorkspace(page);
-  const originalGroup = workspaceBefore.groups.find((group) => group.name === "Group 2");
-  const imageIdsToMove = workspaceBefore.images
-    .filter((image) => image.page === 2 && image.groupId === originalGroup?.id)
-    .map((image) => image.id);
   await balanceButton.click();
+  const moveText = await page.getByRole("status", { name: "Page balance result" }).textContent();
+  const reusableMove = [...(moveText ?? "").matchAll(/(Group [23]) Page 2 → (Group [23]) Page 1/g)]
+    .find((match) => match[1] === match[2]);
+  expect(reusableMove).toBeTruthy();
+  const movedSourceGroup = workspaceBefore.groups.find((group) => group.name === reusableMove?.[1]);
+  const imageIdsToMove = workspaceBefore.images
+    .filter((image) => image.page === 2 && image.groupId === movedSourceGroup?.id)
+    .map((image) => image.id);
   await expect.poll(async () => {
     const workspace = await readStoredWorkspace(page);
     return workspace?.images.filter((image) => imageIdsToMove.includes(image.id))
       .map((image) => ({ page: image.page, groupId: image.groupId }));
-  }).toEqual(imageIdsToMove.map(() => ({ page: 1, groupId: originalGroup?.id })));
+  }).toEqual(imageIdsToMove.map(() => ({ page: 1, groupId: movedSourceGroup?.id })));
   const workspaceAfter = await readStoredWorkspace(page);
-  const moveText = await page.getByRole("status", { name: "Page balance result" }).textContent();
-  const movedGroupNames = moveText?.match(/(Group [23]) Page 2 → (Group [23]) Page 1/);
-  expect(movedGroupNames).toBeTruthy();
-  expect(movedGroupNames?.[1]).toBe(movedGroupNames?.[2]);
-  const movedSourceGroup = workspaceBefore.groups.find((group) => group.name === movedGroupNames?.[1]);
-  const resultingGroup = workspaceAfter.groups.find((group) => group.name === movedGroupNames?.[2]);
+  const resultingGroup = workspaceAfter.groups.find((group) => group.name === reusableMove?.[2]);
   expect(movedSourceGroup).toBeTruthy();
   expect(resultingGroup?.id).toBe(movedSourceGroup?.id);
+  expect(imageIdsToMove).toHaveLength(2);
   const imageIdsToMoveSet = new Set(imageIdsToMove);
-  expect(imageIdsToMoveSet.size).toBe(2);
   const movedImages = workspaceAfter.images.filter((image) => imageIdsToMoveSet.has(image.id));
   expect(movedImages).toHaveLength(2);
   expect(movedImages.every((image) => image.page === 1 && image.groupId === movedSourceGroup?.id)).toBe(true);
