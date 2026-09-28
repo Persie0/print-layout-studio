@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { unzipSync, zipSync } from "fflate";
 import { inflateSync } from "node:zlib";
+import { dirname } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 async function makePng(page, width = 32, height = 32) {
   const dataUrl = await page.evaluate(({ imageWidth, imageHeight }) => {
@@ -298,6 +300,9 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
   });
   const pdf = await page.pdf({ printBackground: true, preferCSSPageSize: true });
   await page.emulateMedia({ media: "screen" });
+  const pdfOutputPath = test.info().outputPath("mixed-orientation-output.pdf");
+  mkdirSync(dirname(pdfOutputPath), { recursive: true });
+  writeFileSync(pdfOutputPath, pdf);
   const pdfText = pdf.toString("latin1");
   const pageObjectCount = [...pdfText.matchAll(/\/Type\s*\/Page\b/g)].length;
   const pageObjects = [...pdfText.matchAll(/(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g)]
