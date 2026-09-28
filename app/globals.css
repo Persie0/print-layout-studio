@@ -394,7 +394,7 @@ button.sheet-text { margin: 0; border: 1px dashed transparent; cursor: pointer; 
   .app-shell { display: block; height: auto; min-height: 0; overflow: visible; }
   .app-shell > :not(.print-document) { display: none !important; }
   .print-document { display: block !important; width: 100%; margin: 0; padding: 0; }
-  .print-page { position: relative; display: block !important; box-sizing: border-box; overflow: visible; page: sheetPortrait; break-after: page; }
+  .print-page { position: relative; display: block !important; box-sizing: border-box; overflow: visible; break-after: page; }
   .print-page:last-child { break-after: auto; }
   .print-sheet {
     display: block !important;

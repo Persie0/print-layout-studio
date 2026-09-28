@@ -507,15 +507,6 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   const includePageTwo = page.getByRole("checkbox", { name: "Include Page 2 in balancing" });
   await includePageTwo.check();
   await expect(includePageTwo).toBeChecked();
-  if (await balanceButton.isDisabled()) {
-    const stored = await readStoredWorkspace(page);
-    console.log("balance-plan-debug", JSON.stringify({
-      hint: await page.locator(".balance-pages-hint").textContent(),
-      selectedPages: await page.getByRole("button", { name: "Choose pages to balance" }).textContent(),
-      images: stored?.images?.map(({ name, page, groupId, textHeightRatio }) => ({ name, page, groupId, textHeightRatio })),
-      groups: stored?.groups?.map(({ id, name }) => ({ id, name })),
-    }));
-  }
   await expect(balanceButton).toBeEnabled();
 
   const pageOneBefore = await readPageAverageMm(page, 1);
@@ -541,7 +532,7 @@ test("real workflow: balance selected pages by moving a group into a new numbere
   const movedImagesAfter = workspaceAfter.images.filter((image) => imagesToMove.some((moved) => moved.id === image.id));
   expect(movedImagesAfter).toHaveLength(2);
   expect(movedImagesAfter.every((image) => image.page === 1 && image.groupId === movedGroup.id)).toBe(true);
-  expect(workspaceAfter.images.find((image) => image.id === "balance-p1-b.png").groupId).toBe(originalGroupTwo.id);
+  expect(workspaceAfter.images.find((image) => image.name === "balance-p1-b.png").groupId).toBe(originalGroupTwo.id);
   await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-b.png"] .sheet-image-number')).toHaveText("1");
   await expect(page.locator('.paper-sheet:not(.print-sheet) .sheet-image[aria-label="Select image balance-p2-c.png"] .sheet-image-number')).toHaveText("2");
 
@@ -599,18 +590,19 @@ test("real workflow: retain a group's number when balancing moves it intact to a
       });
   }).toEqual(["Group 1", "Group 2", "Group 2", "Group 3", "Group 3"]);
   await saveOcrRatios(page, {
-    "reuse-page-one.png": 0.01,
-    "reuse-moving-a.png": 0.08,
-    "reuse-moving-b.png": 0.08,
-    "reuse-staying-a.png": 0.08,
-    "reuse-staying-b.png": 0.08,
+    "reuse-page-one.png": 0.005,
+    "reuse-moving-a.png": 0.05,
+    "reuse-moving-b.png": 0.05,
+    "reuse-staying-a.png": 0.02,
+    "reuse-staying-b.png": 0.02,
   });
   await page.reload();
   await expect(page.getByText("Saved on this device")).toBeVisible();
 
-  await expect(page.getByRole("button", { name: "Balance pages" })).toBeEnabled();
+  const balanceButton = page.getByRole("button", { name: "Balance pages" });
+  await expect(balanceButton).toBeEnabled();
   const workspaceBefore = await readStoredWorkspace(page);
-  await page.getByRole("button", { name: "Balance pages" }).click();
+  await balanceButton.click();
   const workspaceAfter = await readStoredWorkspace(page);
   const moveText = await page.getByRole("status", { name: "Page balance result" }).textContent();
   const movedGroupNames = moveText?.match(/(Group [23]) Page 2 → (Group [23]) Page 1/);
@@ -822,6 +814,11 @@ test("real workflow: persist auto OCR on paste and leave file uploads unscanned"
   await expect(page.getByRole("status", { name: "OCR status for paste-ocr.png" }))
     .toHaveAttribute("data-result", "Text found", { timeout: 120_000 });
   await expect(page.getByRole("status", { name: "OCR status for upload-only.png" })).toHaveAttribute("data-result", "Not scanned");
+  await expect.poll(async () => {
+    const workspace = await readStoredWorkspace(page);
+    const image = workspace?.images.find((candidate) => candidate.name === "paste-ocr.png");
+    return image?.ocrScanned === true && Number(image.textHeightRatio) > 0;
+  }, { timeout: 120_000 }).toBe(true);
 
   await page.reload();
   await expect(page.getByRole("checkbox", { name: "Auto OCR pasted images" })).toBeChecked();

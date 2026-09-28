@@ -964,7 +964,7 @@ export default function PrintStudio() {
   return (
     <div className="app-shell" onPaste={onPaste}>
       <style>{`@media print {
-        @page sheetPortrait { size: ${getPrintPageName(workspace.paper)} portrait; margin: 0; }
+        @page { size: ${getPrintPageName(workspace.paper)} portrait; margin: 0; }
       }`}</style>
       {showTopControls ? (
         <header className="topbar">
