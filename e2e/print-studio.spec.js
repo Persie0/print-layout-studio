@@ -332,6 +332,7 @@ test("real workflow: auto orientation is per-sheet but printed pages all use por
     };
   });
   console.log("print-pdf-debug", JSON.stringify({ pageObjectCount, pageObjects, pageStreams, printLayout, printDocumentLayout }));
+  await test.info().attach("mixed-orientation-output.pdf", { body: pdf, contentType: "application/pdf" });
   expect(pageObjectCount).toBe(2);
   const boxes = [...pdfText.matchAll(/\/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]/g)]
     .map((match) => ({ width: Number(match[3]) - Number(match[1]), height: Number(match[4]) - Number(match[2]) }));
